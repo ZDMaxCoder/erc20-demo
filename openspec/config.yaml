@@ -1,0 +1,21 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Java 8, Maven, Spring Boot 2.7.x, MyBatis-Plus, RocketMQ, Redis (Redisson), MySQL
+  Blockchain: Ethereum ERC-20, Web3j 4.9.8
+  Project: Centralized platform for ERC-20 token deposits and withdrawals
+  Architecture: Multi-module Maven project (common, domain, dal, service, blockchain, mq, api, admin)
+  Amount model: All amounts stored as (long minUnitValue, int exponent) — no floating point
+  Key concerns: Idempotency, chain reorg handling, nonce management, gas strategy, non-standard ERC-20 compatibility
+
+rules:
+  proposal:
+    - Keep proposals focused on one logical module or feature
+    - Reference dependent changes explicitly
+  tasks:
+    - Each task should be completable in one Claude Code session
+    - Include enough context in design.md for session isolation (fresh context window)
+    - Tasks must be verifiable with mvn compile or unit tests
+  design:
+    - Include "Implementation Context" section with key interfaces/models from dependencies
+    - This context enables session isolation without loading full codebase
