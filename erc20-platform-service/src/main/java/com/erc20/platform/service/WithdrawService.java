@@ -96,7 +96,7 @@ public class WithdrawService {
         long feeAmount = tokenConfig.getWithdrawFeeAmount();
         long totalFreeze = request.getAmount() + feeAmount;
 
-        String idempotentKey = IdempotentKeyGenerator.withdrawKey(request.getRequestId());
+        String idempotentKey = IdempotentKeyGenerator.withdrawKey(tokenConfig.getChainId(), request.getRequestId());
 
         accountService.freeze(AccountOperateRequest.builder()
                 .userId(request.getUserId())
@@ -111,6 +111,7 @@ public class WithdrawService {
         WithdrawRecord record = WithdrawRecord.builder()
                 .requestId(request.getRequestId())
                 .idempotentKey(idempotentKey)
+                .chainId(tokenConfig.getChainId())
                 .userId(request.getUserId())
                 .tokenId(request.getTokenId())
                 .toAddress(request.getToAddress())

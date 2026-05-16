@@ -57,6 +57,9 @@ common → domain → dal → service → blockchain → mq → api/admin
 - `security-audit-fixes` — 全量安全审计修复（64 个 TDD 任务，已完成）
 - `safeerc20-remove-retry` — SafeERC20Caller 移除底层重试（已完成）
 
+多链扩展 changes：
+- `multichain-idempotent-key` — 幂等键多链改造，所有 key 包含 chainId（已完成）
+
 ## 自动化脚本
 
 - `scripts/run-changes.sh` — 自动执行所有 OpenSpec changes
@@ -84,9 +87,10 @@ common → domain → dal → service → blockchain → mq → api/admin
 8. **消息幂等**: BaseConsumer 基类统一实现 Redis 消费去重（TTL=24h）
 9. **归集流程**: 余额检测→Gas不足时先补Gas→确认后再发起归集转账
 10. **链上对账**: ChainReconcileJob 每日查询链上 balanceOf 与平台账面对比
+11. **多链幂等**: IdempotentKeyGenerator 所有方法包含 chainId 参数，格式 `{chainId}_{txHash}_{logIndex}` / `WD_{chainId}_{requestId}` / `COL_{chainId}_{...}`，DepositRecord/WithdrawRecord 均含 chainId 字段
 
 ## 数据库
 
-- Schema 由 Flyway 管理（9 个迁移文件，V1-V9）
+- Schema 由 Flyway 管理（10 个迁移文件，V1-V10）
 - 位置: `erc20-platform-dal/src/main/resources/db/migration/`
 - 关键表: t_token_config, t_user_address, t_deposit_record, t_withdraw_record, t_transaction_record, t_nonce_record, t_account_balance, t_account_flow, t_block_record, t_block_sync_progress, t_wallet_config, t_collection_task, t_alert_record, t_address_blacklist

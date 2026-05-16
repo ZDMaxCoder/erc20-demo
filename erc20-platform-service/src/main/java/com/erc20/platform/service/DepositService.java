@@ -85,7 +85,7 @@ public class DepositService {
             return;
         }
 
-        String idempotentKey = IdempotentKeyGenerator.depositKey(event.getTxHash(), event.getLogIndex());
+        String idempotentKey = IdempotentKeyGenerator.depositKey(tokenConfig.getChainId(), event.getTxHash(), event.getLogIndex());
         DepositRecord existing = depositRecordMapper.selectOne(
                 new LambdaQueryWrapper<DepositRecord>()
                         .eq(DepositRecord::getIdempotentKey, idempotentKey));
@@ -119,6 +119,7 @@ public class DepositService {
                 .txHash(event.getTxHash())
                 .logIndex(event.getLogIndex())
                 .idempotentKey(idempotentKey)
+                .chainId(tokenConfig.getChainId())
                 .userId(userAddress.getUserId())
                 .tokenId(tokenConfig.getId())
                 .fromAddress(normalizedFrom)

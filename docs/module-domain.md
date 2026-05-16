@@ -59,9 +59,16 @@ userId, tokenId, availableBalance, frozenBalance, amountExponent, version
 
 其中 `version` 字段用于乐观锁控制并发更新。
 
+### DepositRecord
+```
+txHash, logIndex, idempotentKey, chainId, userId, tokenId,
+fromAddress, toAddress, amount, amountExponent, status,
+blockNumber, blockHash, confirmations, requiredConfirmations, credited
+```
+
 ### WithdrawRecord
 ```
-requestId, idempotentKey, userId, tokenId, toAddress,
+requestId, idempotentKey, chainId, userId, tokenId, toAddress,
 amount, amountExponent, feeAmount, status, txHash,
 retryCount, errorMessage
 ```

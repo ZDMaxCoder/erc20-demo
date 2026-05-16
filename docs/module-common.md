@@ -36,13 +36,13 @@
 
 ### IdempotentKeyGenerator
 
-幂等键生成器，保证同一业务操作不重复执行。
+幂等键生成器，保证同一业务操作不重复执行。所有方法均包含 chainId 参数，确保多链场景下幂等键不冲突。
 
 | 方法 | 格式 | 用途 |
 |------|------|------|
-| `depositKey(txHash, logIndex)` | `{txHash}_{logIndex}` | 充值去重 |
-| `withdrawKey(requestId)` | `WD_{requestId}` | 提现去重 |
-| `collectionKey(address, tokenId, blockNumber)` | `COL_{address}_{tokenId}_{blockNumber}` | 归集去重 |
+| `depositKey(chainId, txHash, logIndex)` | `{chainId}_{txHash}_{logIndex}` | 充值去重 |
+| `withdrawKey(chainId, requestId)` | `WD_{chainId}_{requestId}` | 提现去重 |
+| `collectionKey(chainId, address, tokenId, blockNumber)` | `COL_{chainId}_{address}_{tokenId}_{blockNumber}` | 归集去重 |
 
 ### @DistributedLock 注解
 

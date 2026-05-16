@@ -23,6 +23,7 @@ public class DepositRecord {
     private Integer logIndex;
     private String idempotentKey;
     private String userId;
+    private Integer chainId;
     private Long tokenId;
     private String fromAddress;
     private String toAddress;

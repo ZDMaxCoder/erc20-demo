@@ -49,7 +49,7 @@ Transfer事件 → onTransferEvent()
   ├── 地址匹配（是否平台地址）
   ├── 代币匹配（是否已配置且启用）
   ├── Token 类型检查（非 STANDARD 类型跳过）
-  ├── 幂等检查（txHash + logIndex）
+  ├── 幂等检查（chainId + txHash + logIndex）
   ├── 金额转换（链上 → 平台，溢出 → AMOUNT_OVERFLOW 状态）
   ├── 最小金额检查
   └── 创建充值记录（状态=CONFIRMING）

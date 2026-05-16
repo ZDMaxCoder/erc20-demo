@@ -22,6 +22,7 @@ public class WithdrawRecord {
     private String requestId;
     private String idempotentKey;
     private String userId;
+    private Integer chainId;
     private Long tokenId;
     private String toAddress;
     private Long amount;

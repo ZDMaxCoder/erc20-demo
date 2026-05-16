@@ -73,6 +73,7 @@ class WithdrawServiceTest {
     private TokenConfig buildTokenConfig() {
         return TokenConfig.builder()
                 .id(TOKEN_ID)
+                .chainId(1)
                 .contractAddress(CONTRACT_ADDRESS)
                 .decimals(6)
                 .amountExponent(2)
@@ -592,7 +593,7 @@ class WithdrawServiceTest {
                 .amount(1000L)
                 .feeAmount(10L)
                 .amountExponent(2)
-                .idempotentKey("WD_req001")
+                .idempotentKey("WD_1_req001")
                 .txHash("0xtxhash001")
                 .status(WithdrawStatus.SUCCESS.getCode())
                 .build();

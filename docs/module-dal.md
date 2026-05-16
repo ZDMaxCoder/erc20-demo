@@ -43,6 +43,8 @@
 | `V6__add_transaction_record_wallet_fields.sql` | 交易记录钱包相关字段 |
 | `V7__init_address_blacklist.sql` | t_address_blacklist |
 | `V8__add_deposit_service_fields.sql` | 充值服务补充字段 |
+| `V9__add_token_type.sql` | 代币类型字段 |
+| `V10__add_chain_id_to_deposit_and_withdraw.sql` | 充值/提现表添加 chain_id 列 |
 
 ## 索引策略
 

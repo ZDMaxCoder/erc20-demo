@@ -59,6 +59,7 @@ class DepositServiceTest {
     private TokenConfig buildTokenConfig() {
         return TokenConfig.builder()
                 .id(TOKEN_ID)
+                .chainId(1)
                 .contractAddress(CONTRACT_ADDRESS)
                 .decimals(6)
                 .amountExponent(2)
@@ -154,7 +155,7 @@ class DepositServiceTest {
         doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
         doReturn(buildPlatformAddress()).when(userAddressMapper).selectOne(any(LambdaQueryWrapper.class));
 
-        DepositRecord existing = DepositRecord.builder().id(1L).idempotentKey("0xtx001_0").build();
+        DepositRecord existing = DepositRecord.builder().id(1L).idempotentKey("1_0xtx001_0").build();
         doReturn(existing).when(depositRecordMapper).selectOne(any(LambdaQueryWrapper.class));
 
         depositService.onTransferEvent(event);
