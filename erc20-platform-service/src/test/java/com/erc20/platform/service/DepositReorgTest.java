@@ -29,6 +29,7 @@ class DepositReorgTest {
     @Mock private TokenConfigMapper tokenConfigMapper;
     @Mock private UserAddressMapper userAddressMapper;
     @Mock private AccountService accountService;
+    @Mock private AlertService alertService;
     @Mock private BusinessMetrics businessMetrics;
 
     private DepositService depositService;
@@ -36,7 +37,7 @@ class DepositReorgTest {
     @BeforeEach
     void setUp() {
         depositService = new DepositService(depositRecordMapper, tokenConfigMapper,
-                userAddressMapper, accountService, businessMetrics);
+                userAddressMapper, accountService, alertService, businessMetrics);
     }
 
     // --- 7.1 deposit credited (SUCCESS, credited=1) then reorg → REORGED, balance deducted ---

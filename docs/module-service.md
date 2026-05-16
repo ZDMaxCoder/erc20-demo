@@ -45,10 +45,12 @@ service/
 
 ```
 Transfer事件 → onTransferEvent()
+  ├── Mint 过滤（from=0x0 跳过）
   ├── 地址匹配（是否平台地址）
   ├── 代币匹配（是否已配置且启用）
+  ├── Token 类型检查（非 STANDARD 类型跳过）
   ├── 幂等检查（txHash + logIndex）
-  ├── 金额转换（链上 → 平台）
+  ├── 金额转换（链上 → 平台，溢出 → AMOUNT_OVERFLOW 状态）
   ├── 最小金额检查
   └── 创建充值记录（状态=CONFIRMING）
 
@@ -76,11 +78,12 @@ PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM →
 
 | 方法 | 说明 |
 |------|------|
-| `createWithdraw` | 创建提现（幂等检查 → 冻结余额 → 创建记录） |
+| `createWithdraw` | 创建提现（幂等检查 → 冻结余额 → 风控评估 → 自动通过/拒绝/人工审核） |
 | `approve/reject` | 审批/拒绝（状态流转 + 资金操作） |
 | `executeWithdraw` | 执行提现（分布式锁 → 发送链上交易） |
-| `confirmWithdraw` | 确认提现（扣减冻结 + 扣手续费） |
+| `confirmWithdraw` | 确认提现（验证 actualAmount → 扣减冻结 + 扣手续费） |
 | `failWithdraw` | 提现失败（解冻资金） |
+| `revertConfirmedWithdraw` | Reorg 回退（已确认提现恢复到 BROADCASTING 状态） |
 
 **幂等保证**：requestId 唯一索引 + 分布式锁
 
@@ -150,10 +153,17 @@ PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM →
 
 | 任务 | 间隔 | 说明 |
 |------|------|------|
-| `DepositConfirmJob` | 10s | 检查 CONFIRMING 充值是否达到确认块数 |
-| `WithdrawRetryJob` | 60s | 重试失败的提现（retryCount < 3） |
-| `CollectionScanJob` | 配置化 | 扫描需要归集的地址 |
-| `AccountReconcileJob` | 1h | 余额对账 |
+| `DepositConfirmJob` | 10s | 检查 CONFIRMING 充值是否达到确认块数（分页 500 条/批） |
+| `WithdrawRetryJob` | 30s | 重试卡住的提现（SIGNING 超时、BROADCASTING 超时、APPROVED 超时） |
+| `CollectionScanJob` | 配置化 | 扫描需要归集的地址（含溢出保护） |
+| `AccountReconcileJob` | 1h | 余额流水对账 |
+
+### AlertService（告警服务）
+
+统一告警入口，支持：
+- Redis 去重（可选 bizId 细粒度去重，避免不同业务实体的同类告警被压制）
+- DB 持久化告警记录
+- WARN/CRITICAL 级别通过 MQ 推送
 
 ### 监控指标（BusinessMetrics）
 

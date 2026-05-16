@@ -85,9 +85,19 @@ class WithdrawStateMachineTest {
     }
 
     @Test
-    void success_to_any_notAllowed() {
+    void success_to_broadcasting_allowed_reorgRevert() {
+        assertTrue(stateMachine.canTransition(WithdrawStatus.SUCCESS, WithdrawStatus.BROADCASTING));
+        assertDoesNotThrow(() -> stateMachine.assertTransition(WithdrawStatus.SUCCESS, WithdrawStatus.BROADCASTING));
+    }
+
+    @Test
+    void success_to_otherStates_notAllowed() {
         for (WithdrawStatus target : WithdrawStatus.values()) {
-            assertFalse(stateMachine.canTransition(WithdrawStatus.SUCCESS, target));
+            if (target == WithdrawStatus.BROADCASTING) {
+                continue;
+            }
+            assertFalse(stateMachine.canTransition(WithdrawStatus.SUCCESS, target),
+                    "SUCCESS -> " + target + " should not be allowed");
         }
     }
 

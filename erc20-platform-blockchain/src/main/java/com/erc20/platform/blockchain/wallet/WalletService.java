@@ -8,6 +8,7 @@ import com.erc20.platform.blockchain.gas.GasPriority;
 import com.erc20.platform.blockchain.nonce.NonceManager;
 import com.erc20.platform.common.enums.TxStatus;
 import com.erc20.platform.common.exception.BizException;
+import com.erc20.platform.common.exception.ContractRevertException;
 import com.erc20.platform.common.result.ErrorCode;
 import com.erc20.platform.dal.mapper.TransactionRecordMapper;
 import com.erc20.platform.domain.entity.TransactionRecord;
@@ -67,7 +68,7 @@ public class WalletService {
             BigInteger gasLimit = gasEstimator.estimateERC20Transfer(contract, from, to, amount);
 
             RawTransaction rawTx = transactionBuilder.buildERC20Transfer(
-                    nonce, gasPrice, gasLimit, contract, to, amount);
+                    chainId, nonce, gasPrice, gasLimit, contract, to, amount);
             String signedTx = transactionSigner.sign(rawTx, chainId);
 
             BroadcastResult broadcastResult = transactionBroadcaster.broadcast(signedTx);
@@ -93,6 +94,9 @@ public class WalletService {
                     .build();
             transactionRecordMapper.insert(record);
             return record;
+        } catch (ContractRevertException e) {
+            nonceManager.releaseNonce(chainId, from, nonce);
+            throw new BizException(ErrorCode.CHAIN_ERROR, "Contract call would revert: " + e.getMessage());
         } catch (BizException e) {
             nonceManager.releaseNonce(chainId, from, nonce);
             throw e;
@@ -109,7 +113,7 @@ public class WalletService {
             GasPrice gasPrice = gasPriceCache.getCachedGasPrice(priority);
 
             RawTransaction rawTx = transactionBuilder.buildEthTransfer(
-                    nonce, gasPrice, ETH_TRANSFER_GAS_LIMIT, to, amountWei);
+                    chainId, nonce, gasPrice, ETH_TRANSFER_GAS_LIMIT, to, amountWei);
             String signedTx = transactionSigner.sign(rawTx, chainId);
 
             BroadcastResult broadcastResult = transactionBroadcaster.broadcast(signedTx);
@@ -161,12 +165,12 @@ public class WalletService {
         RawTransaction rawTx;
         if (cancel) {
             rawTx = transactionBuilder.buildEthTransfer(
-                    original.getNonce(), replacementGasPrice,
+                    chainId, original.getNonce(), replacementGasPrice,
                     BigInteger.valueOf(original.getGasLimit()),
                     original.getToAddress(), BigInteger.ZERO);
         } else {
             rawTx = transactionBuilder.buildEthTransfer(
-                    original.getNonce(), replacementGasPrice,
+                    chainId, original.getNonce(), replacementGasPrice,
                     BigInteger.valueOf(original.getGasLimit()),
                     original.getToAddress(), BigInteger.ZERO);
         }

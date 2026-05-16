@@ -20,6 +20,10 @@ import com.erc20.platform.service.dto.WithdrawRequest;
 import com.erc20.platform.service.gateway.WithdrawMessagePublisher;
 import com.erc20.platform.service.gateway.WithdrawTransactionSender;
 import com.erc20.platform.service.monitoring.BusinessMetrics;
+import com.erc20.platform.common.enums.AlertLevel;
+import com.erc20.platform.service.risk.RiskControlService;
+import com.erc20.platform.service.risk.RiskResult;
+import com.erc20.platform.service.risk.RiskStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
@@ -47,6 +51,8 @@ public class WithdrawService {
     private final WithdrawStateMachine stateMachine;
     private final RedissonClient redissonClient;
     private final BusinessMetrics businessMetrics;
+    private final RiskControlService riskControlService;
+    private final AlertService alertService;
 
     public WithdrawService(WithdrawRecordMapper withdrawRecordMapper,
                            TokenConfigMapper tokenConfigMapper,
@@ -56,7 +62,9 @@ public class WithdrawService {
                            WithdrawMessagePublisher messagePublisher,
                            WithdrawStateMachine stateMachine,
                            RedissonClient redissonClient,
-                           BusinessMetrics businessMetrics) {
+                           BusinessMetrics businessMetrics,
+                           RiskControlService riskControlService,
+                           AlertService alertService) {
         this.withdrawRecordMapper = withdrawRecordMapper;
         this.tokenConfigMapper = tokenConfigMapper;
         this.walletConfigMapper = walletConfigMapper;
@@ -66,6 +74,8 @@ public class WithdrawService {
         this.stateMachine = stateMachine;
         this.redissonClient = redissonClient;
         this.businessMetrics = businessMetrics;
+        this.riskControlService = riskControlService;
+        this.alertService = alertService;
     }
 
     @Transactional
@@ -107,13 +117,35 @@ public class WithdrawService {
                 .amount(request.getAmount())
                 .amountExponent(request.getAmountExponent())
                 .feeAmount(feeAmount)
-                .status(WithdrawStatus.PENDING_REVIEW.getCode())
                 .retryCount(0)
                 .createdAt(new Date())
                 .updatedAt(new Date())
                 .build();
 
-        withdrawRecordMapper.insert(record);
+        RiskResult riskResult = riskControlService.checkWithdraw(record);
+
+        if (riskResult.getStatus() == RiskStatus.AUTO_PASS) {
+            record.setStatus(WithdrawStatus.APPROVED.getCode());
+            withdrawRecordMapper.insert(record);
+            messagePublisher.sendExecuteMessage(record.getId());
+        } else if (riskResult.getStatus() == RiskStatus.REJECT) {
+            accountService.unfreeze(AccountOperateRequest.builder()
+                    .userId(request.getUserId())
+                    .tokenId(request.getTokenId())
+                    .amount(totalFreeze)
+                    .amountExponent(request.getAmountExponent())
+                    .flowType(FlowType.UNFREEZE)
+                    .bizId(null)
+                    .idempotentKey(idempotentKey + "_UNFREEZE_RISK_REJECT")
+                    .build());
+            record.setStatus(WithdrawStatus.REJECTED.getCode());
+            record.setErrorMessage(riskResult.getReason());
+            withdrawRecordMapper.insert(record);
+        } else {
+            record.setStatus(WithdrawStatus.PENDING_REVIEW.getCode());
+            withdrawRecordMapper.insert(record);
+        }
+
         return record;
     }
 
@@ -220,6 +252,11 @@ public class WithdrawService {
 
     @Transactional
     public void confirmWithdraw(long withdrawId, String txHash, long blockNumber) {
+        confirmWithdraw(withdrawId, txHash, blockNumber, null);
+    }
+
+    @Transactional
+    public void confirmWithdraw(long withdrawId, String txHash, long blockNumber, BigInteger actualAmount) {
         RLock lock = redissonClient.getLock("withdraw:" + withdrawId);
         boolean acquired;
         try {
@@ -233,7 +270,7 @@ public class WithdrawService {
         }
 
         try {
-            doConfirmWithdraw(withdrawId, txHash, blockNumber);
+            doConfirmWithdraw(withdrawId, txHash, blockNumber, actualAmount);
         } finally {
             if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
@@ -241,7 +278,7 @@ public class WithdrawService {
         }
     }
 
-    private void doConfirmWithdraw(long withdrawId, String txHash, long blockNumber) {
+    private void doConfirmWithdraw(long withdrawId, String txHash, long blockNumber, BigInteger actualAmount) {
         WithdrawRecord record = getWithdrawRecord(withdrawId);
         WithdrawStatus currentStatus = parseStatus(record.getStatus());
 
@@ -259,6 +296,17 @@ public class WithdrawService {
         record.setTxHash(txHash);
         record.setUpdatedAt(new Date());
         withdrawRecordMapper.updateById(record);
+
+        if (actualAmount != null) {
+            TokenConfig tokenConfig = getEnabledToken(record.getTokenId());
+            BigInteger expectedChainAmount = AmountUtil.toChainAmount(
+                    record.getAmount(), record.getAmountExponent(), tokenConfig.getDecimals());
+            if (!actualAmount.equals(expectedChainAmount)) {
+                alertService.alert("WITHDRAW_AMOUNT_MISMATCH", AlertLevel.CRITICAL,
+                        String.format("Withdrawal %d: expected=%s, actual=%s, txHash=%s",
+                                withdrawId, expectedChainAmount, actualAmount, txHash));
+            }
+        }
 
         accountService.decreaseFrozen(AccountOperateRequest.builder()
                 .userId(record.getUserId())
@@ -336,6 +384,60 @@ public class WithdrawService {
         withdrawRecordMapper.updateById(record);
 
         log.info("Withdrawal {} failed: {}", withdrawId, reason);
+    }
+
+    @Transactional
+    public void revertConfirmedWithdraw(long withdrawId) {
+        WithdrawRecord record = getWithdrawRecord(withdrawId);
+        WithdrawStatus currentStatus = parseStatus(record.getStatus());
+
+        if (currentStatus != WithdrawStatus.SUCCESS) {
+            log.info("Withdrawal {} not in SUCCESS status (current={}), skipping revert", withdrawId, currentStatus);
+            return;
+        }
+
+        stateMachine.assertTransition(currentStatus, WithdrawStatus.BROADCASTING);
+
+        String revertKey = record.getIdempotentKey() + "_REVERT_REORG";
+
+        accountService.increaseAvailable(AccountOperateRequest.builder()
+                .userId(record.getUserId())
+                .tokenId(record.getTokenId())
+                .amount(record.getAmount())
+                .amountExponent(record.getAmountExponent())
+                .flowType(FlowType.ADJUSTMENT)
+                .bizId(record.getId())
+                .idempotentKey(revertKey + "_AMOUNT")
+                .build());
+
+        if (record.getFeeAmount() > 0) {
+            accountService.increaseAvailable(AccountOperateRequest.builder()
+                    .userId(record.getUserId())
+                    .tokenId(record.getTokenId())
+                    .amount(record.getFeeAmount())
+                    .amountExponent(record.getAmountExponent())
+                    .flowType(FlowType.ADJUSTMENT)
+                    .bizId(record.getId())
+                    .idempotentKey(revertKey + "_FEE")
+                    .build());
+        }
+
+        long totalFreeze = record.getAmount() + record.getFeeAmount();
+        accountService.freeze(AccountOperateRequest.builder()
+                .userId(record.getUserId())
+                .tokenId(record.getTokenId())
+                .amount(totalFreeze)
+                .amountExponent(record.getAmountExponent())
+                .flowType(FlowType.FREEZE)
+                .bizId(record.getId())
+                .idempotentKey(revertKey + "_REFREEZE")
+                .build());
+
+        record.setStatus(WithdrawStatus.BROADCASTING.getCode());
+        record.setUpdatedAt(new Date());
+        withdrawRecordMapper.updateById(record);
+
+        log.warn("Withdrawal {} reverted from SUCCESS to BROADCASTING due to reorg", withdrawId);
     }
 
     private WithdrawRecord getWithdrawRecord(long withdrawId) {

@@ -2,7 +2,9 @@ package com.erc20.platform.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.erc20.platform.common.enums.AddressStatus;
+import com.erc20.platform.common.enums.AlertLevel;
 import com.erc20.platform.common.enums.CollectionTaskStatus;
+import com.erc20.platform.common.enums.TokenType;
 import com.erc20.platform.common.enums.WalletType;
 import com.erc20.platform.dal.mapper.CollectionTaskMapper;
 import com.erc20.platform.dal.mapper.TokenConfigMapper;
@@ -28,12 +30,15 @@ import java.util.concurrent.Semaphore;
 @Service
 public class CollectionService {
 
+    private static final int LONG_MAX_BIT_LENGTH = 63;
+
     private final CollectionTaskMapper collectionTaskMapper;
     private final TokenConfigMapper tokenConfigMapper;
     private final UserAddressMapper userAddressMapper;
     private final WalletConfigMapper walletConfigMapper;
     private final CollectionTransactionSender transactionSender;
     private final GasSupplyService gasSupplyService;
+    private final AlertService alertService;
     private final CollectionProperties properties;
     private final BusinessMetrics businessMetrics;
 
@@ -43,6 +48,7 @@ public class CollectionService {
                              WalletConfigMapper walletConfigMapper,
                              CollectionTransactionSender transactionSender,
                              GasSupplyService gasSupplyService,
+                             AlertService alertService,
                              CollectionProperties properties,
                              BusinessMetrics businessMetrics) {
         this.collectionTaskMapper = collectionTaskMapper;
@@ -51,11 +57,18 @@ public class CollectionService {
         this.walletConfigMapper = walletConfigMapper;
         this.transactionSender = transactionSender;
         this.gasSupplyService = gasSupplyService;
+        this.alertService = alertService;
         this.properties = properties;
         this.businessMetrics = businessMetrics;
     }
 
     public void scanForCollection(TokenConfig token) {
+        if (!TokenType.STANDARD.getCode().equals(token.getTokenType())) {
+            log.info("Skipping collection scan for non-STANDARD token: id={}, type={}",
+                    token.getId(), token.getTokenType());
+            return;
+        }
+
         List<UserAddress> addresses = userAddressMapper.selectList(
                 new LambdaQueryWrapper<UserAddress>()
                         .eq(UserAddress::getTokenId, token.getId())
@@ -73,6 +86,14 @@ public class CollectionService {
     private void checkAndCreateTask(UserAddress addr, TokenConfig token) {
         BigInteger balance = transactionSender.getERC20Balance(token.getContractAddress(), addr.getAddress());
         if (balance.compareTo(BigInteger.valueOf(token.getCollectionThreshold())) < 0) {
+            return;
+        }
+
+        if (balance.bitLength() > LONG_MAX_BIT_LENGTH) {
+            alertService.alert("COLLECTION_BALANCE_OVERFLOW", AlertLevel.CRITICAL,
+                    "Balance overflow for address " + addr.getAddress() + ": " + balance,
+                    addr.getAddress());
+            log.error("Collection balance overflow for address {}: {}", addr.getAddress(), balance);
             return;
         }
 

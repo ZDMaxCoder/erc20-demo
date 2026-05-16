@@ -35,7 +35,8 @@ public class DepositConfirmJob {
     public void confirmDeposits() {
         List<DepositRecord> confirming = depositRecordMapper.selectList(
                 new LambdaQueryWrapper<DepositRecord>()
-                        .eq(DepositRecord::getStatus, DepositStatus.CONFIRMING.getCode()));
+                        .eq(DepositRecord::getStatus, DepositStatus.CONFIRMING.getCode())
+                        .last("LIMIT 500"));
 
         if (confirming.isEmpty()) {
             return;

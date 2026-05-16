@@ -6,6 +6,8 @@ import com.erc20.platform.blockchain.gas.GasPriceCache;
 import com.erc20.platform.blockchain.gas.GasPriority;
 import com.erc20.platform.blockchain.nonce.NonceManager;
 import com.erc20.platform.common.enums.TxStatus;
+import com.erc20.platform.common.exception.BizException;
+import com.erc20.platform.common.exception.ContractRevertException;
 import com.erc20.platform.dal.mapper.TransactionRecordMapper;
 import com.erc20.platform.domain.entity.TransactionRecord;
 import org.junit.jupiter.api.BeforeEach;
@@ -70,7 +72,7 @@ class WalletServiceTest {
         doReturn(nonce).when(nonceManager).allocateNonce(CHAIN_ID, FROM);
         doReturn(gasPrice).when(gasPriceCache).getCachedGasPrice(GasPriority.MEDIUM);
         doReturn(gasLimit).when(gasEstimator).estimateERC20Transfer(CONTRACT, FROM, TO, AMOUNT);
-        doReturn(rawTx).when(transactionBuilder).buildERC20Transfer(nonce, gasPrice, gasLimit, CONTRACT, TO, AMOUNT);
+        doReturn(rawTx).when(transactionBuilder).buildERC20Transfer(CHAIN_ID, nonce, gasPrice, gasLimit, CONTRACT, TO, AMOUNT);
         doReturn(SIGNED_TX).when(transactionSigner).sign(rawTx, CHAIN_ID);
         doReturn(BroadcastResult.success(TX_HASH)).when(transactionBroadcaster).broadcast(SIGNED_TX);
         doReturn(1).when(transactionRecordMapper).insert(any(TransactionRecord.class));
@@ -104,7 +106,7 @@ class WalletServiceTest {
         doReturn(nonce).when(nonceManager).allocateNonce(CHAIN_ID, FROM);
         doReturn(gasPrice).when(gasPriceCache).getCachedGasPrice(GasPriority.MEDIUM);
         doReturn(gasLimit).when(gasEstimator).estimateERC20Transfer(CONTRACT, FROM, TO, AMOUNT);
-        doReturn(rawTx).when(transactionBuilder).buildERC20Transfer(nonce, gasPrice, gasLimit, CONTRACT, TO, AMOUNT);
+        doReturn(rawTx).when(transactionBuilder).buildERC20Transfer(CHAIN_ID, nonce, gasPrice, gasLimit, CONTRACT, TO, AMOUNT);
         doReturn(SIGNED_TX).when(transactionSigner).sign(rawTx, CHAIN_ID);
         doReturn(BroadcastResult.error(BroadcastErrorType.INSUFFICIENT_FUNDS, "insufficient funds"))
                 .when(transactionBroadcaster).broadcast(SIGNED_TX);
@@ -150,7 +152,7 @@ class WalletServiceTest {
         doReturn(original).when(transactionRecordMapper).selectOne(any());
         doReturn(replacementGasPrice).when(gasPriceCache).getReplacementGasPrice(any(GasPrice.class));
         doReturn(rawTx).when(transactionBuilder).buildEthTransfer(
-                eq(5L), eq(replacementGasPrice), any(BigInteger.class), eq(TO), eq(BigInteger.ZERO));
+                eq((long) CHAIN_ID), eq(5L), eq(replacementGasPrice), any(BigInteger.class), eq(TO), eq(BigInteger.ZERO));
         doReturn(newSignedTx).when(transactionSigner).sign(rawTx, CHAIN_ID);
         doReturn(BroadcastResult.success(newTxHash)).when(transactionBroadcaster).broadcast(newSignedTx);
         doReturn(1).when(transactionRecordMapper).insert(any(TransactionRecord.class));
@@ -166,5 +168,28 @@ class WalletServiceTest {
         TransactionRecord updatedOriginal = captor.getValue();
         assertEquals(TxStatus.REPLACED.getCode(), updatedOriginal.getStatus());
         assertEquals(newTxHash, updatedOriginal.getReplacedByTxHash());
+    }
+
+    // --- 7.4 ContractRevertException from gasEstimator → BizException + nonce released ---
+
+    @Test
+    void sendERC20Transfer_contractRevert_throwsBizExceptionAndReleasesNonce() {
+        long nonce = 5L;
+        GasPrice gasPrice = GasPrice.builder()
+                .eip1559(false)
+                .gasPrice(BigInteger.valueOf(20_000_000_000L))
+                .build();
+
+        doReturn(nonce).when(nonceManager).allocateNonce(CHAIN_ID, FROM);
+        doReturn(gasPrice).when(gasPriceCache).getCachedGasPrice(GasPriority.MEDIUM);
+        doThrow(new ContractRevertException("execution reverted: ERC20: transfer amount exceeds balance"))
+                .when(gasEstimator).estimateERC20Transfer(CONTRACT, FROM, TO, AMOUNT);
+
+        BizException ex = assertThrows(BizException.class, () ->
+                walletService.sendERC20Transfer(FROM, TO, CONTRACT, AMOUNT, GasPriority.MEDIUM));
+
+        assertTrue(ex.getMessage().contains("Contract call would revert"));
+        verify(nonceManager).releaseNonce(CHAIN_ID, FROM, nonce);
+        verify(transactionBroadcaster, never()).broadcast(anyString());
     }
 }

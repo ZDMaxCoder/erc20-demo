@@ -34,8 +34,18 @@ public class AlertService {
         this.alertProperties = alertProperties;
     }
 
+    public void alert(String alertType, AlertLevel level, String content, String bizId) {
+        String suffix = (bizId != null && !bizId.isEmpty()) ? ":" + bizId : "";
+        String dedupKey = DEDUP_KEY_PREFIX + alertType + ":" + level.getCode() + suffix;
+        doAlert(alertType, level, content, dedupKey);
+    }
+
     public void alert(String alertType, AlertLevel level, String content) {
         String dedupKey = DEDUP_KEY_PREFIX + alertType + ":" + level.getCode();
+        doAlert(alertType, level, content, dedupKey);
+    }
+
+    private void doAlert(String alertType, AlertLevel level, String content, String dedupKey) {
         RBucket<String> bucket = redissonClient.getBucket(dedupKey);
 
         if (bucket.isExists()) {

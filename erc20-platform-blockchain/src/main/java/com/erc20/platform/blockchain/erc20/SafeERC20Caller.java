@@ -1,12 +1,12 @@
 package com.erc20.platform.blockchain.erc20;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.web3j.abi.FunctionEncoder;
 import org.web3j.abi.FunctionReturnDecoder;
 import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
-import org.web3j.abi.datatypes.Bool;
 import org.web3j.abi.datatypes.Function;
 import org.web3j.abi.datatypes.Utf8String;
 import org.web3j.abi.datatypes.generated.Uint256;
@@ -18,9 +18,9 @@ import org.web3j.protocol.core.methods.response.EthCall;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.utils.Numeric;
 
+import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -30,12 +30,15 @@ import java.util.concurrent.CompletableFuture;
 public class SafeERC20Caller {
 
     private static final String ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-    private static final int DEFAULT_DECIMALS = 18;
+    private static final String DYNAMIC_OFFSET_32 = "0000000000000000000000000000000000000000000000000000000000000020";
 
     private final Web3j web3j;
+    private final String callerAddress;
 
-    public SafeERC20Caller(Web3j web3j) {
+    public SafeERC20Caller(Web3j web3j,
+                           @Value("${blockchain.caller-address:}") String callerAddress) {
         this.web3j = web3j;
+        this.callerAddress = (callerAddress != null && !callerAddress.isEmpty()) ? callerAddress : ZERO_ADDRESS;
     }
 
     public BigInteger safeBalanceOf(String contract, String owner) {
@@ -45,27 +48,28 @@ public class SafeERC20Caller {
                 Collections.singletonList(new TypeReference<Uint256>() {})
         );
         String result = ethCall(contract, function);
+        if (result == null || result.equals("0x") || result.isEmpty()) {
+            throw new RuntimeException("balanceOf returned empty for " + contract);
+        }
         List<org.web3j.abi.datatypes.Type> decoded = FunctionReturnDecoder.decode(result, function.getOutputParameters());
+        if (decoded.isEmpty()) {
+            throw new RuntimeException("balanceOf returned empty for " + contract);
+        }
         return ((Uint256) decoded.get(0)).getValue();
     }
 
     public int safeDecimals(String contract) {
-        try {
-            Function function = new Function(
-                    "decimals",
-                    Collections.emptyList(),
-                    Collections.singletonList(new TypeReference<Uint8>() {})
-            );
-            String result = ethCall(contract, function);
-            List<org.web3j.abi.datatypes.Type> decoded = FunctionReturnDecoder.decode(result, function.getOutputParameters());
-            if (!decoded.isEmpty()) {
-                return ((Uint8) decoded.get(0)).getValue().intValue();
-            }
-            return decodeBytes32AsInt(result);
-        } catch (Exception e) {
-            log.warn("Failed to read decimals for {}, using default {}: {}", contract, DEFAULT_DECIMALS, e.getMessage());
-            return DEFAULT_DECIMALS;
+        Function function = new Function(
+                "decimals",
+                Collections.emptyList(),
+                Collections.singletonList(new TypeReference<Uint8>() {})
+        );
+        String result = ethCall(contract, function);
+        List<org.web3j.abi.datatypes.Type> decoded = FunctionReturnDecoder.decode(result, function.getOutputParameters());
+        if (!decoded.isEmpty()) {
+            return ((Uint8) decoded.get(0)).getValue().intValue();
         }
+        return decodeBytes32AsInt(result);
     }
 
     public String safeSymbol(String contract) {
@@ -122,17 +126,15 @@ public class SafeERC20Caller {
         String encodedFunction = FunctionEncoder.encode(function);
         try {
             EthCall response = web3j.ethCall(
-                    Transaction.createEthCallTransaction(ZERO_ADDRESS, contract, encodedFunction),
+                    Transaction.createEthCallTransaction(callerAddress, contract, encodedFunction),
                     DefaultBlockParameterName.LATEST
             ).send();
             if (response.hasError()) {
-                throw new RuntimeException("eth_call error: " + response.getError().getMessage());
+                throw new ChainCallException(contract, response.getError().getMessage());
             }
             return response.getValue();
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("eth_call failed", e);
+        } catch (IOException e) {
+            throw new ChainCallException(contract, e);
         }
     }
 
@@ -143,6 +145,16 @@ public class SafeERC20Caller {
 
     private String decodeBytes32AsString(String hexValue) {
         String cleaned = Numeric.cleanHexPrefix(hexValue);
+
+        if (cleaned.length() >= 192 && cleaned.substring(0, 64).equals(DYNAMIC_OFFSET_32)) {
+            String lengthHex = cleaned.substring(64, 128);
+            int length = new BigInteger(lengthHex, 16).intValue();
+            if (length > 0 && cleaned.length() >= 128 + length * 2) {
+                byte[] dataBytes = Numeric.hexStringToByteArray(cleaned.substring(128, 128 + length * 2));
+                return new String(dataBytes, StandardCharsets.UTF_8);
+            }
+        }
+
         if (cleaned.length() > 64) {
             cleaned = cleaned.substring(0, 64);
         }

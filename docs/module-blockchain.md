@@ -20,6 +20,7 @@ blockchain/
 ├── gas/             — Gas 策略
 ├── health/          — 健康检查指标
 ├── nonce/           — Nonce 管理
+├── reconcile/       — 链上余额对账
 ├── sync/            — 区块同步引擎
 └── wallet/          — 交易发送与确认
 ```
@@ -52,11 +53,16 @@ web3jProvider.sendWithFailover(web3j -> web3j.ethBlockNumber().send());
 
 | 方法 | 非标适配 |
 |------|----------|
-| `safeBalanceOf` | 标准 uint256 解码 |
+| `safeBalanceOf` | 标准 uint256 解码，空返回值抛 ChainCallException |
 | `safeTransfer` | 处理无返回值（USDT）和 bool 返回值 |
 | `safeApprove` | 非零 allowance 时先置零再 approve（BNB） |
-| `safeDecimals` | uint8 → bytes32 fallback → 默认 18 |
-| `safeSymbol` | string → bytes32（strip null padding）fallback |
+| `safeDecimals` | uint8 → bytes32 fallback，失败抛异常（不默认 18） |
+| `safeSymbol` | string → bytes32（strip null padding / ABI dynamic offset）fallback |
+
+**错误处理**：底层 `ethCall()` 单次调用、快速失败，不自动重试。
+- IOException → 抛出 `ChainCallException`（携带 contract 地址）
+- RPC response error → 抛出 `ChainCallException`（携带错误信息）
+- 调用方（ChainReconcileJob、CollectionService 等）自行决定重试策略
 
 #### TokenMetadataReader
 
@@ -131,8 +137,9 @@ public interface GasStrategy {
 
 检测到链重组时：
 - 回滚受影响区块的 BlockRecord
-- 标记相关充值记录为 REORGED
-- 回退已入账金额
+- 调用 `DepositService.handleReorg()` 回退已入账充值余额
+- 调用 `WithdrawService.revertConfirmedWithdraw()` 回退已确认提现
+- 重置受影响的 TransactionRecord 为 PENDING 状态
 
 #### TransferEventExtractor
 
@@ -155,7 +162,7 @@ public interface GasStrategy {
 
 #### TransactionBuilder
 
-构建 RawTransaction（支持 EIP-1559 和 Legacy 两种格式）。
+构建 RawTransaction（支持 EIP-1559 和 Legacy 两种格式），chainId 通过参数传入。
 
 #### TransactionSigner
 
@@ -167,7 +174,21 @@ public interface GasStrategy {
 
 #### TransactionConfirmTracker
 
-定时轮询 pending 交易状态，确认后通知下游。
+定时轮询 pending 交易状态：
+- receipt status=0x1 且包含 Transfer 事件 → 标记 CONFIRMED（携带 actualAmount）
+- receipt status=0x1 但无 Transfer 事件 → 标记 FAILED（"Transfer event not found"）
+- receipt status=0x0 → 标记 FAILED
+- 状态变更通过 MQ 通知下游（TxStatusChangedMessage）
+
+#### ChainReconcileJob
+
+每日 3AM 链上余额对账：
+- 查询所有启用 token 的热钱包链上 balanceOf
+- 与平台账面余额对比，差异超阈值则发出 CRITICAL 告警
+
+#### AdminEventMonitor
+
+监控 token 合约管理事件（Paused、Upgraded），检测到后发出 CRITICAL 告警。
 
 ## 配置项
 
@@ -188,12 +209,14 @@ blockchain:
 
 ## 测试覆盖
 
-18 个测试类，覆盖：
+覆盖：
 - ERC-20 解析（标准/非标/边界）
+- SafeERC20Caller 错误处理（空返回、ChainCallException）
 - Nonce 并发分配与回收
-- Gas 策略计算
-- 区块同步与 Reorg 处理
-- 交易广播与确认
+- Gas 策略计算（含 revert 检测）
+- 区块同步与 Reorg 处理（余额回退验证）
+- 交易确认（Transfer 事件验证）
+- 链上对账
 - 健康检查
 
 ## 依赖关系

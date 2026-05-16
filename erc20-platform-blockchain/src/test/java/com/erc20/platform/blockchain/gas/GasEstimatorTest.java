@@ -1,5 +1,6 @@
 package com.erc20.platform.blockchain.gas;
 
+import com.erc20.platform.common.exception.ContractRevertException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -7,8 +8,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.Request;
+import org.web3j.protocol.core.Response;
 import org.web3j.protocol.core.methods.response.EthEstimateGas;
 
+import java.io.IOException;
 import java.math.BigInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -69,5 +72,34 @@ class GasEstimatorTest {
         BigInteger result = estimator.estimateEthTransfer();
 
         assertEquals(BigInteger.valueOf(21000), result);
+    }
+
+    // --- 7.1 response hasError with "execution reverted" → ContractRevertException ---
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void estimateERC20Transfer_responseHasRevertError_throwsContractRevertException() throws Exception {
+        EthEstimateGas response = mock(EthEstimateGas.class);
+        when(response.hasError()).thenReturn(true);
+        Response.Error error = new Response.Error(-32000, "execution reverted: ERC20: transfer amount exceeds balance");
+        when(response.getError()).thenReturn(error);
+        when(estimateGasRequest.send()).thenReturn(response);
+        when(web3j.ethEstimateGas(any())).thenReturn(estimateGasRequest);
+
+        assertThrows(ContractRevertException.class, () ->
+                estimator.estimateERC20Transfer(CONTRACT, FROM, TO, AMOUNT));
+    }
+
+    // --- 7.2 IOException → DEFAULT_ERC20_GAS fallback ---
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void estimateERC20Transfer_ioException_returnsDefault80000() throws Exception {
+        when(web3j.ethEstimateGas(any())).thenReturn(estimateGasRequest);
+        when(estimateGasRequest.send()).thenThrow(new IOException("Connection refused"));
+
+        BigInteger result = estimator.estimateERC20Transfer(CONTRACT, FROM, TO, AMOUNT);
+
+        assertEquals(BigInteger.valueOf(80000), result);
     }
 }

@@ -1,9 +1,11 @@
 package com.erc20.platform.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.erc20.platform.common.enums.AlertLevel;
 import com.erc20.platform.common.enums.AddressStatus;
 import com.erc20.platform.common.enums.DepositStatus;
 import com.erc20.platform.common.enums.FlowType;
+import com.erc20.platform.common.enums.TokenType;
 import com.erc20.platform.dal.mapper.DepositRecordMapper;
 import com.erc20.platform.dal.mapper.TokenConfigMapper;
 import com.erc20.platform.dal.mapper.UserAddressMapper;
@@ -24,6 +26,8 @@ import java.math.BigInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -33,6 +37,7 @@ class DepositServiceTest {
     @Mock private TokenConfigMapper tokenConfigMapper;
     @Mock private UserAddressMapper userAddressMapper;
     @Mock private AccountService accountService;
+    @Mock private AlertService alertService;
     @Mock private BusinessMetrics businessMetrics;
 
     private DepositService depositService;
@@ -46,8 +51,10 @@ class DepositServiceTest {
     @BeforeEach
     void setUp() {
         depositService = new DepositService(depositRecordMapper, tokenConfigMapper,
-                userAddressMapper, accountService, businessMetrics);
+                userAddressMapper, accountService, alertService, businessMetrics);
     }
+
+    private static final String ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
     private TokenConfig buildTokenConfig() {
         return TokenConfig.builder()
@@ -57,6 +64,7 @@ class DepositServiceTest {
                 .amountExponent(2)
                 .depositConfirmBlocks(12)
                 .minDepositAmount(100L)
+                .tokenType(TokenType.STANDARD.getCode())
                 .enabled(1)
                 .build();
     }
@@ -222,5 +230,73 @@ class DepositServiceTest {
 
         verify(accountService, never()).increaseAvailable(any());
         verify(depositRecordMapper, never()).updateById(any());
+    }
+
+    // --- 8.1 Mint event (from=zero address) → skipped ---
+
+    @Test
+    void onTransferEvent_mintEvent_fromZeroAddress_skipped() {
+        TransferEventDTO event = buildTransferEvent(1000000L);
+        event.setFrom(ZERO_ADDRESS);
+
+        depositService.onTransferEvent(event);
+
+        verify(userAddressMapper, never()).selectOne(any(LambdaQueryWrapper.class));
+        verify(tokenConfigMapper, never()).selectOne(any(LambdaQueryWrapper.class));
+        verify(depositRecordMapper, never()).insert(any());
+    }
+
+    // --- 8.2 Non-STANDARD token type → skipped ---
+
+    @Test
+    void onTransferEvent_feeOnTransferToken_skipped() {
+        TransferEventDTO event = buildTransferEvent(1000000L);
+
+        TokenConfig feeToken = buildTokenConfig();
+        feeToken.setTokenType(TokenType.FEE_ON_TRANSFER.getCode());
+
+        doReturn(buildPlatformAddress()).when(userAddressMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(feeToken).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
+
+        depositService.onTransferEvent(event);
+
+        verify(depositRecordMapper, never()).insert(any());
+    }
+
+    // --- 8.3 Amount overflow → AMOUNT_OVERFLOW status + alert ---
+
+    @Test
+    void onTransferEvent_amountOverflow_createsRecordWithOverflowStatusAndAlert() {
+        BigInteger hugeAmount = BigInteger.TEN.pow(32);
+        TransferEventDTO event = TransferEventDTO.builder()
+                .contractAddress(CONTRACT_ADDRESS)
+                .from(EXTERNAL_ADDRESS)
+                .to(PLATFORM_ADDRESS)
+                .value(hugeAmount)
+                .txHash("0xtx_overflow")
+                .blockNumber(200L)
+                .blockHash("0xblockhash_overflow")
+                .logIndex(0)
+                .build();
+
+        TokenConfig tokenConfig = buildTokenConfig();
+        tokenConfig.setDecimals(18);
+        tokenConfig.setAmountExponent(6);
+
+        doReturn(buildPlatformAddress()).when(userAddressMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(tokenConfig).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(null).when(depositRecordMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(1).when(depositRecordMapper).insert(any(DepositRecord.class));
+
+        depositService.onTransferEvent(event);
+
+        ArgumentCaptor<DepositRecord> captor = ArgumentCaptor.forClass(DepositRecord.class);
+        verify(depositRecordMapper).insert(captor.capture());
+        DepositRecord record = captor.getValue();
+        assertEquals(DepositStatus.AMOUNT_OVERFLOW.getCode(), record.getStatus());
+        assertEquals(0L, record.getAmount().longValue());
+
+        verify(alertService).alert(eq("DEPOSIT_OVERFLOW"), eq(AlertLevel.CRITICAL),
+                contains("0xtx_overflow"), eq("0xtx_overflow"));
     }
 }

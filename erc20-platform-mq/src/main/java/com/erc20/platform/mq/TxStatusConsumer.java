@@ -67,7 +67,7 @@ public class TxStatusConsumer extends BaseConsumer<TxStatusChangedMessage>
                 record.getId(), message.getFromStatus(), message.getToStatus());
 
         if (TxStatus.CONFIRMED.getCode().equals(message.getToStatus())) {
-            withdrawService.confirmWithdraw(record.getId(), message.getTxHash(), message.getBlockNumber());
+            withdrawService.confirmWithdraw(record.getId(), message.getTxHash(), message.getBlockNumber(), message.getActualAmount());
         } else if (TxStatus.FAILED.getCode().equals(message.getToStatus())) {
             withdrawService.failWithdraw(record.getId(), "Transaction failed on-chain");
         }

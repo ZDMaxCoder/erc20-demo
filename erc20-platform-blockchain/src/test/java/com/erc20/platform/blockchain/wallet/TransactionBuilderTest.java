@@ -4,6 +4,7 @@ import com.erc20.platform.blockchain.gas.GasPrice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.web3j.crypto.RawTransaction;
+import org.web3j.crypto.transaction.type.Transaction1559;
 import org.web3j.utils.Numeric;
 
 import java.math.BigInteger;
@@ -35,7 +36,7 @@ class TransactionBuilderTest {
                 .build();
 
         RawTransaction rawTx = transactionBuilder.buildERC20Transfer(
-                NONCE, gasPrice, GAS_LIMIT, CONTRACT, RECIPIENT, AMOUNT);
+                1L, NONCE, gasPrice, GAS_LIMIT, CONTRACT, RECIPIENT, AMOUNT);
 
         assertNotNull(rawTx);
         assertEquals(CONTRACT.toLowerCase(), rawTx.getTo().toLowerCase());
@@ -64,7 +65,7 @@ class TransactionBuilderTest {
         BigInteger amountWei = BigInteger.valueOf(1_000_000_000_000_000_000L);
 
         RawTransaction rawTx = transactionBuilder.buildEthTransfer(
-                NONCE, gasPrice, GAS_LIMIT, RECIPIENT, amountWei);
+                1L, NONCE, gasPrice, GAS_LIMIT, RECIPIENT, amountWei);
 
         assertNotNull(rawTx);
         assertEquals(RECIPIENT.toLowerCase(), rawTx.getTo().toLowerCase());
@@ -83,11 +84,46 @@ class TransactionBuilderTest {
                 .build();
 
         RawTransaction rawTx = transactionBuilder.buildERC20Transfer(
-                NONCE, gasPrice, GAS_LIMIT, CONTRACT, RECIPIENT, AMOUNT);
+                1L, NONCE, gasPrice, GAS_LIMIT, CONTRACT, RECIPIENT, AMOUNT);
 
         assertNotNull(rawTx);
         assertNotNull(rawTx.getTransaction());
         assertEquals(CONTRACT.toLowerCase(), rawTx.getTo().toLowerCase());
+    }
+
+    // --- 14.1 EIP-1559 tx uses provided chainId (not hardcoded 1) ---
+
+    @Test
+    void buildERC20Transfer_eip1559_usesProvidedChainId() {
+        GasPrice gasPrice = GasPrice.builder()
+                .eip1559(true)
+                .maxFeePerGas(BigInteger.valueOf(30_000_000_000L))
+                .maxPriorityFeePerGas(BigInteger.valueOf(2_000_000_000L))
+                .build();
+
+        long chainId = 137L;
+        RawTransaction rawTx = transactionBuilder.buildERC20Transfer(
+                chainId, NONCE, gasPrice, GAS_LIMIT, CONTRACT, RECIPIENT, AMOUNT);
+
+        assertNotNull(rawTx);
+        assertEquals(137L, ((Transaction1559) rawTx.getTransaction()).getChainId());
+    }
+
+    @Test
+    void buildEthTransfer_eip1559_usesProvidedChainId() {
+        GasPrice gasPrice = GasPrice.builder()
+                .eip1559(true)
+                .maxFeePerGas(BigInteger.valueOf(30_000_000_000L))
+                .maxPriorityFeePerGas(BigInteger.valueOf(2_000_000_000L))
+                .build();
+        BigInteger amountWei = BigInteger.valueOf(1_000_000_000_000_000_000L);
+
+        long chainId = 56L;
+        RawTransaction rawTx = transactionBuilder.buildEthTransfer(
+                chainId, NONCE, gasPrice, GAS_LIMIT, RECIPIENT, amountWei);
+
+        assertNotNull(rawTx);
+        assertEquals(56L, ((Transaction1559) rawTx.getTransaction()).getChainId());
     }
 
     @Test
@@ -100,7 +136,7 @@ class TransactionBuilderTest {
         BigInteger amountWei = BigInteger.valueOf(1_000_000_000_000_000_000L);
 
         RawTransaction rawTx = transactionBuilder.buildEthTransfer(
-                NONCE, gasPrice, GAS_LIMIT, RECIPIENT, amountWei);
+                1L, NONCE, gasPrice, GAS_LIMIT, RECIPIENT, amountWei);
 
         assertNotNull(rawTx);
         assertEquals(RECIPIENT.toLowerCase(), rawTx.getTo().toLowerCase());

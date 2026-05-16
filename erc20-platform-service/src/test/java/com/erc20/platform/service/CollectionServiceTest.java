@@ -2,7 +2,9 @@ package com.erc20.platform.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.erc20.platform.common.enums.AddressStatus;
+import com.erc20.platform.common.enums.AlertLevel;
 import com.erc20.platform.common.enums.CollectionTaskStatus;
+import com.erc20.platform.common.enums.TokenType;
 import com.erc20.platform.dal.mapper.CollectionTaskMapper;
 import com.erc20.platform.dal.mapper.TokenConfigMapper;
 import com.erc20.platform.dal.mapper.UserAddressMapper;
@@ -29,6 +31,8 @@ import java.util.Date;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -40,6 +44,7 @@ class CollectionServiceTest {
     @Mock private WalletConfigMapper walletConfigMapper;
     @Mock private CollectionTransactionSender transactionSender;
     @Mock private GasSupplyService gasSupplyService;
+    @Mock private AlertService alertService;
     @Mock private BusinessMetrics businessMetrics;
 
     private CollectionProperties properties;
@@ -58,7 +63,8 @@ class CollectionServiceTest {
         properties.setMinIntervalHours(4);
         properties.setGasBufferMultiplier(new BigDecimal("1.5"));
         collectionService = new CollectionService(collectionTaskMapper, tokenConfigMapper,
-                userAddressMapper, walletConfigMapper, transactionSender, gasSupplyService, properties, businessMetrics);
+                userAddressMapper, walletConfigMapper, transactionSender, gasSupplyService,
+                alertService, properties, businessMetrics);
     }
 
     private TokenConfig buildTokenConfig() {
@@ -68,6 +74,7 @@ class CollectionServiceTest {
                 .decimals(6)
                 .amountExponent(2)
                 .collectionThreshold(100000000L)
+                .tokenType(TokenType.STANDARD.getCode())
                 .enabled(1)
                 .build();
     }
@@ -267,5 +274,37 @@ class CollectionServiceTest {
         CollectionTask updated = captor.getValue();
         assertEquals(CollectionTaskStatus.GAS_SUPPLYING.getCode(), updated.getStatus());
         assertEquals("0xtx_gas", updated.getGasTxHash());
+    }
+
+    // --- 8.5 scanForCollection with non-STANDARD token → returns without scanning ---
+
+    @Test
+    void scanForCollection_nonStandardToken_returnsWithoutScanning() {
+        TokenConfig feeToken = buildTokenConfig();
+        feeToken.setTokenType(TokenType.FEE_ON_TRANSFER.getCode());
+
+        collectionService.scanForCollection(feeToken);
+
+        verify(userAddressMapper, never()).selectList(any(LambdaQueryWrapper.class));
+        verify(transactionSender, never()).getERC20Balance(anyString(), anyString());
+        verify(collectionTaskMapper, never()).insert(any());
+    }
+
+    // --- 8.6 balance overflow → alert raised, no task created ---
+
+    @Test
+    void scanForCollection_balanceOverflow_alertRaisedNoTaskCreated() {
+        TokenConfig token = buildTokenConfig();
+        UserAddress addr = buildUserAddress();
+        BigInteger overflowBalance = BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.ONE);
+
+        doReturn(Collections.singletonList(addr)).when(userAddressMapper).selectList(any(LambdaQueryWrapper.class));
+        doReturn(overflowBalance).when(transactionSender).getERC20Balance(CONTRACT, USER_ADDRESS);
+
+        collectionService.scanForCollection(token);
+
+        verify(collectionTaskMapper, never()).insert(any());
+        verify(alertService).alert(eq("COLLECTION_BALANCE_OVERFLOW"), eq(AlertLevel.CRITICAL),
+                contains(USER_ADDRESS), eq(USER_ADDRESS));
     }
 }

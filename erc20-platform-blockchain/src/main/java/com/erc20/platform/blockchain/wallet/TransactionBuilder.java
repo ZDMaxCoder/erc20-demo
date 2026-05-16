@@ -16,8 +16,9 @@ import java.util.Collections;
 @Component
 public class TransactionBuilder {
 
-    public RawTransaction buildERC20Transfer(long nonce, GasPrice gasPrice, BigInteger gasLimit,
-                                             String contractAddress, String to, BigInteger amount) {
+    public RawTransaction buildERC20Transfer(long chainId, long nonce, GasPrice gasPrice,
+                                             BigInteger gasLimit, String contractAddress,
+                                             String to, BigInteger amount) {
         Function function = new Function(
                 "transfer",
                 Arrays.asList(new Address(to), new Uint256(amount)),
@@ -27,7 +28,7 @@ public class TransactionBuilder {
 
         if (gasPrice.isEip1559()) {
             return RawTransaction.createTransaction(
-                    1L,
+                    chainId,
                     BigInteger.valueOf(nonce),
                     gasLimit,
                     contractAddress,
@@ -47,11 +48,11 @@ public class TransactionBuilder {
         );
     }
 
-    public RawTransaction buildEthTransfer(long nonce, GasPrice gasPrice, BigInteger gasLimit,
-                                           String to, BigInteger amountWei) {
+    public RawTransaction buildEthTransfer(long chainId, long nonce, GasPrice gasPrice,
+                                           BigInteger gasLimit, String to, BigInteger amountWei) {
         if (gasPrice.isEip1559()) {
             return RawTransaction.createTransaction(
-                    1L,
+                    chainId,
                     BigInteger.valueOf(nonce),
                     gasLimit,
                     to,

@@ -9,12 +9,14 @@ import com.erc20.platform.domain.entity.DepositRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Arrays;
 import java.util.Collections;
 
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.*;
@@ -120,5 +122,30 @@ class DepositConfirmJobTest {
 
         verify(depositService).creditDeposit(1L);
         verify(depositService, never()).creditDeposit(2L);
+    }
+
+    // --- 15.1 query limited to 500 records ---
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void confirmDeposits_queryLimitedTo500Records() throws Exception {
+        doReturn(Collections.emptyList())
+                .when(depositRecordMapper).selectList(any(LambdaQueryWrapper.class));
+
+        depositConfirmJob.confirmDeposits();
+
+        ArgumentCaptor<LambdaQueryWrapper<DepositRecord>> captor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(depositRecordMapper).selectList(captor.capture());
+
+        java.lang.reflect.Field lastSqlField =
+                com.baomidou.mybatisplus.core.conditions.AbstractWrapper.class
+                        .getDeclaredField("lastSql");
+        lastSqlField.setAccessible(true);
+        Object lastSqlObj = lastSqlField.get(captor.getValue());
+        java.lang.reflect.Method getStringValue = lastSqlObj.getClass().getMethod("getStringValue");
+        String lastSql = (String) getStringValue.invoke(lastSqlObj);
+        assertTrue(lastSql != null && lastSql.contains("LIMIT 500"),
+                "Query should include LIMIT 500 but lastSql was: " + lastSql);
     }
 }

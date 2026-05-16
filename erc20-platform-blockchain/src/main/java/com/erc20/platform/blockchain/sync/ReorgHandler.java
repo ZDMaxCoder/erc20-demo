@@ -4,14 +4,18 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.erc20.platform.blockchain.config.Web3jProvider;
 import com.erc20.platform.common.enums.AlertLevel;
-import com.erc20.platform.common.enums.DepositStatus;
+import com.erc20.platform.common.enums.TxStatus;
 import com.erc20.platform.dal.mapper.BlockRecordMapper;
 import com.erc20.platform.dal.mapper.BlockSyncProgressMapper;
 import com.erc20.platform.dal.mapper.DepositRecordMapper;
+import com.erc20.platform.dal.mapper.TransactionRecordMapper;
+import com.erc20.platform.dal.mapper.WithdrawRecordMapper;
 import com.erc20.platform.domain.entity.BlockRecord;
 import com.erc20.platform.domain.entity.BlockSyncProgress;
-import com.erc20.platform.domain.entity.DepositRecord;
+import com.erc20.platform.domain.entity.TransactionRecord;
 import com.erc20.platform.service.AlertService;
+import com.erc20.platform.service.DepositService;
+import com.erc20.platform.service.WithdrawService;
 import com.erc20.platform.service.monitoring.BusinessMetrics;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -19,7 +23,9 @@ import org.web3j.protocol.core.DefaultBlockParameterNumber;
 import org.web3j.protocol.core.methods.response.EthBlock;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 
 @Slf4j
 @Component
@@ -32,6 +38,10 @@ public class ReorgHandler {
     private final Web3jProvider web3jProvider;
     private final BlockSyncProperties properties;
     private final BusinessMetrics businessMetrics;
+    private final DepositService depositService;
+    private final WithdrawService withdrawService;
+    private final WithdrawRecordMapper withdrawRecordMapper;
+    private final TransactionRecordMapper transactionRecordMapper;
 
     public ReorgHandler(BlockRecordMapper blockRecordMapper,
                         BlockSyncProgressMapper blockSyncProgressMapper,
@@ -39,7 +49,11 @@ public class ReorgHandler {
                         AlertService alertService,
                         Web3jProvider web3jProvider,
                         BlockSyncProperties properties,
-                        BusinessMetrics businessMetrics) {
+                        BusinessMetrics businessMetrics,
+                        DepositService depositService,
+                        WithdrawService withdrawService,
+                        WithdrawRecordMapper withdrawRecordMapper,
+                        TransactionRecordMapper transactionRecordMapper) {
         this.blockRecordMapper = blockRecordMapper;
         this.blockSyncProgressMapper = blockSyncProgressMapper;
         this.depositRecordMapper = depositRecordMapper;
@@ -47,6 +61,10 @@ public class ReorgHandler {
         this.web3jProvider = web3jProvider;
         this.properties = properties;
         this.businessMetrics = businessMetrics;
+        this.depositService = depositService;
+        this.withdrawService = withdrawService;
+        this.withdrawRecordMapper = withdrawRecordMapper;
+        this.transactionRecordMapper = transactionRecordMapper;
     }
 
     public long handleReorg(long currentBlockNumber, String expectedParentHash, String actualParentHash) throws IOException {
@@ -109,11 +127,11 @@ public class ReorgHandler {
                         .gt("block_number", forkPoint)
                         .set("reorged", 1));
 
-        depositRecordMapper.update(null,
-                new UpdateWrapper<DepositRecord>()
-                        .gt("block_number", forkPoint)
-                        .ne("status", DepositStatus.REORGED.getCode())
-                        .set("status", DepositStatus.REORGED.getCode()));
+        List<Long> affectedBlockNumbers = collectAffectedBlockNumbers(forkPoint, currentBlockNumber);
+        depositService.handleReorg(affectedBlockNumbers);
+
+        revertConfirmedWithdrawals(forkPoint);
+        resetConfirmedTransactionRecords(forkPoint);
 
         BlockRecord forkBlock = blockRecordMapper.selectOne(
                 new QueryWrapper<BlockRecord>()
@@ -132,5 +150,38 @@ public class ReorgHandler {
         businessMetrics.incrementReorg();
         log.info("Reorg handled. Fork point: {}, rolled back {} blocks", forkPoint, currentBlockNumber - 1 - forkPoint);
         return forkPoint;
+    }
+
+    private List<Long> collectAffectedBlockNumbers(long forkPoint, long currentBlockNumber) {
+        List<Long> blockNumbers = new ArrayList<>();
+        for (long b = forkPoint + 1; b < currentBlockNumber; b++) {
+            blockNumbers.add(b);
+        }
+        return blockNumbers;
+    }
+
+    private void revertConfirmedWithdrawals(long forkPoint) {
+        List<TransactionRecord> confirmedTxs = transactionRecordMapper.selectList(
+                new QueryWrapper<TransactionRecord>()
+                        .eq("status", TxStatus.CONFIRMED.getCode())
+                        .gt("block_number", forkPoint)
+                        .eq("biz_type", "WITHDRAW"));
+
+        for (TransactionRecord tx : confirmedTxs) {
+            if (tx.getBizId() != null) {
+                withdrawService.revertConfirmedWithdraw(tx.getBizId());
+                log.warn("Reverted confirmed withdrawal {} (txHash={}) due to reorg", tx.getBizId(), tx.getTxHash());
+            }
+        }
+    }
+
+    private void resetConfirmedTransactionRecords(long forkPoint) {
+        transactionRecordMapper.update(null,
+                new UpdateWrapper<TransactionRecord>()
+                        .eq("status", TxStatus.CONFIRMED.getCode())
+                        .gt("block_number", forkPoint)
+                        .set("status", TxStatus.PENDING.getCode())
+                        .set("block_number", null)
+                        .set("block_hash", null));
     }
 }

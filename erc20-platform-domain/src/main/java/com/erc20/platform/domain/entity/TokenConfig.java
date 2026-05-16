@@ -30,6 +30,7 @@ public class TokenConfig {
     private Long minWithdrawAmount;
     private Long withdrawFeeAmount;
     private Long collectionThreshold;
+    private String tokenType;
     private Integer enabled;
     private Date createdAt;
     private Date updatedAt;

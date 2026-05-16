@@ -1,8 +1,11 @@
 package com.erc20.platform.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.erc20.platform.common.enums.AlertLevel;
 import com.erc20.platform.common.enums.DepositStatus;
 import com.erc20.platform.common.enums.FlowType;
+import com.erc20.platform.common.enums.TokenType;
+import com.erc20.platform.common.exception.AmountOverflowException;
 import com.erc20.platform.common.util.AddressUtil;
 import com.erc20.platform.common.util.AmountUtil;
 import com.erc20.platform.common.util.IdempotentKeyGenerator;
@@ -26,25 +29,36 @@ import java.util.List;
 @Service
 public class DepositService {
 
+    private static final String ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
     private final DepositRecordMapper depositRecordMapper;
     private final TokenConfigMapper tokenConfigMapper;
     private final UserAddressMapper userAddressMapper;
     private final AccountService accountService;
+    private final AlertService alertService;
     private final BusinessMetrics businessMetrics;
 
     public DepositService(DepositRecordMapper depositRecordMapper,
                           TokenConfigMapper tokenConfigMapper,
                           UserAddressMapper userAddressMapper,
                           AccountService accountService,
+                          AlertService alertService,
                           BusinessMetrics businessMetrics) {
         this.depositRecordMapper = depositRecordMapper;
         this.tokenConfigMapper = tokenConfigMapper;
         this.userAddressMapper = userAddressMapper;
         this.accountService = accountService;
+        this.alertService = alertService;
         this.businessMetrics = businessMetrics;
     }
 
     public void onTransferEvent(TransferEventDTO event) {
+        String normalizedFrom = AddressUtil.normalize(event.getFrom());
+        if (ZERO_ADDRESS.equals(normalizedFrom)) {
+            log.info("Mint event skipped: txHash={}", event.getTxHash());
+            return;
+        }
+
         String normalizedTo = AddressUtil.normalize(event.getTo());
 
         UserAddress userAddress = userAddressMapper.selectOne(
@@ -65,6 +79,12 @@ public class DepositService {
             return;
         }
 
+        if (!TokenType.STANDARD.getCode().equals(tokenConfig.getTokenType())) {
+            log.info("Unsupported token type {}: contract={}, skipping",
+                    tokenConfig.getTokenType(), normalizedContract);
+            return;
+        }
+
         String idempotentKey = IdempotentKeyGenerator.depositKey(event.getTxHash(), event.getLogIndex());
         DepositRecord existing = depositRecordMapper.selectOne(
                 new LambdaQueryWrapper<DepositRecord>()
@@ -74,15 +94,25 @@ public class DepositService {
             return;
         }
 
-        long amount = AmountUtil.fromChainAmount(event.getValue(),
-                tokenConfig.getDecimals(), tokenConfig.getAmountExponent());
-
+        long amount;
         String status;
-        if (amount < tokenConfig.getMinDepositAmount()) {
-            status = DepositStatus.BELOW_MINIMUM.getCode();
-            log.info("Deposit below minimum: amount={}, min={}", amount, tokenConfig.getMinDepositAmount());
-        } else {
-            status = DepositStatus.CONFIRMING.getCode();
+        try {
+            amount = AmountUtil.fromChainAmount(event.getValue(),
+                    tokenConfig.getDecimals(), tokenConfig.getAmountExponent());
+
+            if (amount < tokenConfig.getMinDepositAmount()) {
+                status = DepositStatus.BELOW_MINIMUM.getCode();
+                log.info("Deposit below minimum: amount={}, min={}", amount, tokenConfig.getMinDepositAmount());
+            } else {
+                status = DepositStatus.CONFIRMING.getCode();
+            }
+        } catch (AmountOverflowException e) {
+            amount = 0L;
+            status = DepositStatus.AMOUNT_OVERFLOW.getCode();
+            alertService.alert("DEPOSIT_OVERFLOW", AlertLevel.CRITICAL,
+                    "Deposit amount overflow: txHash=" + event.getTxHash() + ", value=" + event.getValue(),
+                    event.getTxHash());
+            log.error("Deposit amount overflow: txHash={}, value={}", event.getTxHash(), event.getValue());
         }
 
         DepositRecord record = DepositRecord.builder()
@@ -91,7 +121,7 @@ public class DepositService {
                 .idempotentKey(idempotentKey)
                 .userId(userAddress.getUserId())
                 .tokenId(tokenConfig.getId())
-                .fromAddress(AddressUtil.normalize(event.getFrom()))
+                .fromAddress(normalizedFrom)
                 .toAddress(normalizedTo)
                 .amount(amount)
                 .amountExponent(tokenConfig.getAmountExponent())

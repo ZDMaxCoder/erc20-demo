@@ -17,6 +17,9 @@ import com.erc20.platform.service.dto.WithdrawRequest;
 import com.erc20.platform.service.gateway.WithdrawMessagePublisher;
 import com.erc20.platform.service.gateway.WithdrawTransactionSender;
 import com.erc20.platform.service.monitoring.BusinessMetrics;
+import com.erc20.platform.service.risk.RiskControlService;
+import com.erc20.platform.service.risk.RiskResult;
+import com.erc20.platform.common.enums.AlertLevel;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -45,6 +48,8 @@ class WithdrawServiceTest {
     @Mock private RedissonClient redissonClient;
     @Mock private RLock rLock;
     @Mock private BusinessMetrics businessMetrics;
+    @Mock private RiskControlService riskControlService;
+    @Mock private AlertService alertService;
 
     private WithdrawStateMachine stateMachine;
     private WithdrawService withdrawService;
@@ -61,7 +66,8 @@ class WithdrawServiceTest {
         withdrawService = new WithdrawService(
                 withdrawRecordMapper, tokenConfigMapper, walletConfigMapper,
                 accountService, transactionSender, messagePublisher,
-                stateMachine, redissonClient, businessMetrics);
+                stateMachine, redissonClient, businessMetrics, riskControlService,
+                alertService);
     }
 
     private TokenConfig buildTokenConfig() {
@@ -112,6 +118,7 @@ class WithdrawServiceTest {
         doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
         doReturn(null).when(withdrawRecordMapper).selectOne(any(LambdaQueryWrapper.class));
         doReturn(1).when(withdrawRecordMapper).insert(any(WithdrawRecord.class));
+        doReturn(RiskResult.manualReview("large amount")).when(riskControlService).checkWithdraw(any(WithdrawRecord.class));
 
         WithdrawRecord result = withdrawService.createWithdraw(request);
 
@@ -209,6 +216,75 @@ class WithdrawServiceTest {
 
         BizException ex = assertThrows(BizException.class, () -> withdrawService.createWithdraw(request));
         assertEquals(ErrorCode.TOKEN_DISABLED.getCode(), ex.getCode());
+    }
+
+    // ============================
+    // 4.1 risk check — AUTO_PASS
+    // ============================
+
+    @Test
+    void createWithdraw_riskAutoPass_statusApprovedAndExecuteMessagePublished() {
+        WithdrawRequest request = buildWithdrawRequest();
+
+        doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(null).when(withdrawRecordMapper).selectOne(any(LambdaQueryWrapper.class));
+        doAnswer(invocation -> {
+            WithdrawRecord r = invocation.getArgument(0);
+            r.setId(1L);
+            return 1;
+        }).when(withdrawRecordMapper).insert(any(WithdrawRecord.class));
+        doReturn(RiskResult.pass()).when(riskControlService).checkWithdraw(any(WithdrawRecord.class));
+
+        WithdrawRecord result = withdrawService.createWithdraw(request);
+
+        assertEquals(WithdrawStatus.APPROVED.getCode(), result.getStatus());
+        verify(riskControlService).checkWithdraw(any(WithdrawRecord.class));
+        verify(messagePublisher).sendExecuteMessage(1L);
+    }
+
+    // ============================
+    // 4.2 risk check — REJECT
+    // ============================
+
+    @Test
+    void createWithdraw_riskReject_balanceUnfrozenAndStatusRejected() {
+        WithdrawRequest request = buildWithdrawRequest();
+
+        doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(null).when(withdrawRecordMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(1).when(withdrawRecordMapper).insert(any(WithdrawRecord.class));
+        doReturn(RiskResult.reject("blacklisted address")).when(riskControlService).checkWithdraw(any(WithdrawRecord.class));
+
+        WithdrawRecord result = withdrawService.createWithdraw(request);
+
+        assertEquals(WithdrawStatus.REJECTED.getCode(), result.getStatus());
+        assertEquals("blacklisted address", result.getErrorMessage());
+
+        ArgumentCaptor<AccountOperateRequest> captor = ArgumentCaptor.forClass(AccountOperateRequest.class);
+        verify(accountService).unfreeze(captor.capture());
+        AccountOperateRequest unfreezeReq = captor.getValue();
+        assertEquals(1010L, unfreezeReq.getAmount().longValue());
+        assertEquals(FlowType.UNFREEZE, unfreezeReq.getFlowType());
+    }
+
+    // ============================
+    // 4.3 risk check — NEED_MANUAL_REVIEW
+    // ============================
+
+    @Test
+    void createWithdraw_riskNeedManualReview_statusPendingReview() {
+        WithdrawRequest request = buildWithdrawRequest();
+
+        doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(null).when(withdrawRecordMapper).selectOne(any(LambdaQueryWrapper.class));
+        doReturn(1).when(withdrawRecordMapper).insert(any(WithdrawRecord.class));
+        doReturn(RiskResult.manualReview("large amount")).when(riskControlService).checkWithdraw(any(WithdrawRecord.class));
+
+        WithdrawRecord result = withdrawService.createWithdraw(request);
+
+        assertEquals(WithdrawStatus.PENDING_REVIEW.getCode(), result.getStatus());
+        verify(riskControlService).checkWithdraw(any(WithdrawRecord.class));
+        verify(messagePublisher, never()).sendExecuteMessage(anyLong());
     }
 
     // ============================
@@ -501,5 +577,163 @@ class WithdrawServiceTest {
 
         verify(accountService, never()).decreaseFrozen(any());
         verify(withdrawRecordMapper, never()).updateById(any());
+    }
+
+    // ============================
+    // revertConfirmedWithdraw — reorg scenario
+    // ============================
+
+    @Test
+    void revertConfirmedWithdraw_successRecord_statusBroadcastingAndFrozenRestored() {
+        WithdrawRecord record = WithdrawRecord.builder()
+                .id(1L)
+                .userId(USER_ID)
+                .tokenId(TOKEN_ID)
+                .amount(1000L)
+                .feeAmount(10L)
+                .amountExponent(2)
+                .idempotentKey("WD_req001")
+                .txHash("0xtxhash001")
+                .status(WithdrawStatus.SUCCESS.getCode())
+                .build();
+        doReturn(record).when(withdrawRecordMapper).selectById(1L);
+        doReturn(1).when(withdrawRecordMapper).updateById(any());
+
+        withdrawService.revertConfirmedWithdraw(1L);
+
+        assertEquals(WithdrawStatus.BROADCASTING.getCode(), record.getStatus());
+
+        ArgumentCaptor<AccountOperateRequest> increaseCaptor = ArgumentCaptor.forClass(AccountOperateRequest.class);
+        verify(accountService, atLeastOnce()).increaseAvailable(increaseCaptor.capture());
+        long totalIncreased = 0;
+        for (AccountOperateRequest req : increaseCaptor.getAllValues()) {
+            totalIncreased += req.getAmount();
+            assertEquals(FlowType.ADJUSTMENT, req.getFlowType());
+        }
+        assertEquals(1010L, totalIncreased);
+
+        ArgumentCaptor<AccountOperateRequest> freezeCaptor = ArgumentCaptor.forClass(AccountOperateRequest.class);
+        verify(accountService, atLeastOnce()).freeze(freezeCaptor.capture());
+        long totalFrozen = 0;
+        for (AccountOperateRequest req : freezeCaptor.getAllValues()) {
+            totalFrozen += req.getAmount();
+        }
+        assertEquals(1010L, totalFrozen);
+    }
+
+    @Test
+    void revertConfirmedWithdraw_notInSuccessStatus_noOp() {
+        WithdrawRecord record = WithdrawRecord.builder()
+                .id(1L)
+                .status(WithdrawStatus.BROADCASTING.getCode())
+                .build();
+        doReturn(record).when(withdrawRecordMapper).selectById(1L);
+
+        withdrawService.revertConfirmedWithdraw(1L);
+
+        verify(accountService, never()).increaseAvailable(any());
+        verify(withdrawRecordMapper, never()).updateById(any());
+    }
+
+    @Test
+    void revertConfirmedWithdraw_alreadyReverted_noOp() {
+        WithdrawRecord record = WithdrawRecord.builder()
+                .id(1L)
+                .status(WithdrawStatus.BROADCASTING.getCode())
+                .build();
+        doReturn(record).when(withdrawRecordMapper).selectById(1L);
+
+        withdrawService.revertConfirmedWithdraw(1L);
+
+        verify(accountService, never()).increaseAvailable(any());
+        verify(withdrawRecordMapper, never()).updateById(any());
+    }
+
+    // ============================
+    // 5.1 confirmWithdraw — matching actualAmount → no alert
+    // ============================
+
+    @Test
+    void confirmWithdraw_matchingActualAmount_noAlert() throws Exception {
+        stubLock();
+
+        WithdrawRecord record = WithdrawRecord.builder()
+                .id(1L)
+                .userId(USER_ID)
+                .tokenId(TOKEN_ID)
+                .amount(1000L)
+                .feeAmount(10L)
+                .amountExponent(2)
+                .txHash("0xtxhash001")
+                .status(WithdrawStatus.PENDING_CONFIRM.getCode())
+                .build();
+        doReturn(record).when(withdrawRecordMapper).selectById(1L);
+        doReturn(1).when(withdrawRecordMapper).updateById(any());
+        doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
+
+        // token decimals=6, amountExponent=2, amount=1000 → chainAmount = 1000 * 10^(6-2) = 10000000
+        BigInteger matchingAmount = BigInteger.valueOf(10000000L);
+
+        withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L, matchingAmount);
+
+        assertEquals(WithdrawStatus.SUCCESS.getCode(), record.getStatus());
+        verify(alertService, never()).alert(anyString(), any(AlertLevel.class), anyString());
+    }
+
+    // ============================
+    // 5.2 confirmWithdraw — mismatched actualAmount → alert raised, still confirmed
+    // ============================
+
+    @Test
+    void confirmWithdraw_mismatchedActualAmount_alertRaisedButStillConfirmed() throws Exception {
+        stubLock();
+
+        WithdrawRecord record = WithdrawRecord.builder()
+                .id(1L)
+                .userId(USER_ID)
+                .tokenId(TOKEN_ID)
+                .amount(1000L)
+                .feeAmount(10L)
+                .amountExponent(2)
+                .txHash("0xtxhash001")
+                .status(WithdrawStatus.PENDING_CONFIRM.getCode())
+                .build();
+        doReturn(record).when(withdrawRecordMapper).selectById(1L);
+        doReturn(1).when(withdrawRecordMapper).updateById(any());
+        doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
+
+        BigInteger mismatchedAmount = BigInteger.valueOf(5000000L);
+
+        withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L, mismatchedAmount);
+
+        assertEquals(WithdrawStatus.SUCCESS.getCode(), record.getStatus());
+        verify(alertService).alert(eq("WITHDRAW_AMOUNT_MISMATCH"), eq(AlertLevel.CRITICAL), anyString());
+    }
+
+    // ============================
+    // 5.3 confirmWithdraw — null actualAmount → no comparison, confirm normally
+    // ============================
+
+    @Test
+    void confirmWithdraw_nullActualAmount_noComparisonConfirmNormally() throws Exception {
+        stubLock();
+
+        WithdrawRecord record = WithdrawRecord.builder()
+                .id(1L)
+                .userId(USER_ID)
+                .tokenId(TOKEN_ID)
+                .amount(1000L)
+                .feeAmount(10L)
+                .amountExponent(2)
+                .txHash("0xtxhash001")
+                .status(WithdrawStatus.PENDING_CONFIRM.getCode())
+                .build();
+        doReturn(record).when(withdrawRecordMapper).selectById(1L);
+        doReturn(1).when(withdrawRecordMapper).updateById(any());
+
+        withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L, null);
+
+        assertEquals(WithdrawStatus.SUCCESS.getCode(), record.getStatus());
+        verify(alertService, never()).alert(anyString(), any(AlertLevel.class), anyString());
     }
 }

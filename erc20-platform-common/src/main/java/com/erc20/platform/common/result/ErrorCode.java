@@ -22,7 +22,10 @@ public enum ErrorCode {
     CHAIN_ERROR(40001, "Blockchain interaction error"),
     NONCE_CONFLICT(40002, "Nonce conflict"),
     BROADCAST_FAILED(40003, "Transaction broadcast failed"),
-    INSUFFICIENT_FUNDS(40004, "Insufficient funds for transaction");
+    INSUFFICIENT_FUNDS(40004, "Insufficient funds for transaction"),
+    AMOUNT_OVERFLOW(20007, "Amount exceeds system capacity"),
+    TRANSFER_NOT_CONFIRMED(40005, "ERC-20 transfer event not found in receipt"),
+    TOKEN_TYPE_UNSUPPORTED(20008, "Token type not supported");
 
     private final int code;
     private final String message;

@@ -165,6 +165,41 @@ class ERC20TransferEventParserTest {
         assertEquals(TO_CLEAN, events.get(1).getFrom());
     }
 
+    // --- 14.3 data with 0x prefix + 64 hex chars → correct amount; extra trailing bytes ignored ---
+
+    @Test
+    void parse_dataWithExtraTrailingBytes_parsesFirst32BytesOnly() {
+        String data = "0x0000000000000000000000000000000000000000000000000000000005f5e100"
+                + "0000000000000000000000000000000000000000000000000000000000000001";
+
+        Log log = buildLog(
+                CONTRACT,
+                Arrays.asList(ERC20TransferEventParser.TRANSFER_EVENT_SIGNATURE, FROM_ADDR, TO_ADDR),
+                data, TX_HASH, "0x64", "0x0"
+        );
+
+        Optional<TransferEvent> result = parser.parse(log, CONTRACT);
+
+        assertTrue(result.isPresent());
+        assertEquals(new BigInteger("100000000"), result.get().getValue());
+    }
+
+    @Test
+    void parse_standardData_0xPrefixAndExact64HexChars_correctAmount() {
+        String data = "0x00000000000000000000000000000000000000000000000000000000000f4240";
+
+        Log log = buildLog(
+                CONTRACT,
+                Arrays.asList(ERC20TransferEventParser.TRANSFER_EVENT_SIGNATURE, FROM_ADDR, TO_ADDR),
+                data, TX_HASH, "0x64", "0x0"
+        );
+
+        Optional<TransferEvent> result = parser.parse(log, CONTRACT);
+
+        assertTrue(result.isPresent());
+        assertEquals(new BigInteger("1000000"), result.get().getValue());
+    }
+
     private Log buildLog(String address, List<String> topics, String data,
                          String txHash, String blockNumber, String logIndex) {
         Log log = new Log();

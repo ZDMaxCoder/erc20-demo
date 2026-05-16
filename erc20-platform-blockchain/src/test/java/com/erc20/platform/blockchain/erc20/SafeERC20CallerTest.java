@@ -9,11 +9,15 @@ import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.Request;
 import org.web3j.protocol.core.methods.response.EthCall;
 
+import java.io.IOException;
+import java.lang.reflect.Method;
 import java.math.BigInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -32,7 +36,7 @@ class SafeERC20CallerTest {
 
     @BeforeEach
     void setUp() {
-        caller = new SafeERC20Caller(web3j);
+        caller = new SafeERC20Caller(web3j, "");
     }
 
     @Test
@@ -78,15 +82,6 @@ class SafeERC20CallerTest {
         assertEquals(8, result);
     }
 
-    @Test
-    void safeDecimals_failure_returnsDefault18() throws Exception {
-        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
-        when(ethCallRequest.send()).thenThrow(new RuntimeException("RPC error"));
-
-        int result = caller.safeDecimals(CONTRACT);
-
-        assertEquals(18, result);
-    }
 
     @Test
     void safeSymbol_standardString_returnsCorrectValue() throws Exception {
@@ -121,5 +116,74 @@ class SafeERC20CallerTest {
         String result = caller.safeSymbol(CONTRACT);
 
         assertEquals("MKR", result);
+    }
+
+    // --- Task 10.1: safeBalanceOf empty response ---
+
+    @Test
+    void safeBalanceOf_emptyResponse_throwsRuntimeException() throws Exception {
+        EthCall ethCallResponse = new EthCall();
+        ethCallResponse.setResult("0x");
+
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenReturn(ethCallResponse);
+
+        RuntimeException ex = assertThrows(RuntimeException.class,
+                () -> caller.safeBalanceOf(CONTRACT, OWNER));
+        assertTrue(ex.getMessage().contains("balanceOf returned empty"));
+    }
+
+    // --- Task 10.2: safeDecimals failure throws (no default 18) ---
+
+    @Test
+    void safeDecimals_failure_throwsRuntimeException() throws Exception {
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenThrow(new RuntimeException("RPC error"));
+
+        assertThrows(RuntimeException.class, () -> caller.safeDecimals(CONTRACT));
+    }
+
+    // --- ChainCallException: no retry, immediate failure ---
+
+    @Test
+    void ethCall_ioException_throwsChainCallExceptionImmediately() throws Exception {
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenThrow(new IOException("connection reset"));
+
+        ChainCallException ex = assertThrows(ChainCallException.class,
+                () -> caller.safeBalanceOf(CONTRACT, OWNER));
+        assertEquals(CONTRACT, ex.getContract());
+        assertTrue(ex.getCause() instanceof IOException);
+        verify(ethCallRequest, times(1)).send();
+    }
+
+    @Test
+    void ethCall_responseError_throwsChainCallException() throws Exception {
+        EthCall errorResponse = new EthCall();
+        errorResponse.setError(new org.web3j.protocol.core.Response.Error(3, "execution reverted"));
+
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenReturn(errorResponse);
+
+        ChainCallException ex = assertThrows(ChainCallException.class,
+                () -> caller.safeBalanceOf(CONTRACT, OWNER));
+        assertEquals(CONTRACT, ex.getContract());
+        assertTrue(ex.getMessage().contains("execution reverted"));
+    }
+
+    // --- Task 10.4: decodeBytes32AsString with ABI dynamic offset ---
+
+    @Test
+    void decodeBytes32AsString_dynamicOffset_decodesCorrectly() throws Exception {
+        String hexData = "0x"
+                + "0000000000000000000000000000000000000000000000000000000000000020"
+                + "0000000000000000000000000000000000000000000000000000000000000004"
+                + "5553445400000000000000000000000000000000000000000000000000000000";
+
+        Method method = SafeERC20Caller.class.getDeclaredMethod("decodeBytes32AsString", String.class);
+        method.setAccessible(true);
+        String result = (String) method.invoke(caller, hexData);
+
+        assertEquals("USDT", result);
     }
 }

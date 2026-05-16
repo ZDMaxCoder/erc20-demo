@@ -41,7 +41,7 @@ public class ERC20TransferEventParser {
 
             String from = extractAddress(topics.get(1));
             String to = extractAddress(topics.get(2));
-            BigInteger value = Numeric.decodeQuantity("0x" + data.substring(2));
+            BigInteger value = new BigInteger(data.substring(2, 66), 16);
 
             return Optional.of(TransferEvent.builder()
                     .contractAddress(contractAddress.toLowerCase())

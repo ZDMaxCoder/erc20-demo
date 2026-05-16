@@ -110,4 +110,53 @@ class AlertServiceTest {
         verify(alertRecordMapper).insert(any(AlertRecord.class));
         verify(alertMessagePublisher).publish(any(AlertMessage.class));
     }
+
+    // 11.1: two alerts same type/level but different bizId → both created
+    @Test
+    void alert_sameTypeLevelDifferentBizId_bothCreated() {
+        @SuppressWarnings("unchecked")
+        RBucket<String> bucket1 = mock(RBucket.class);
+        @SuppressWarnings("unchecked")
+        RBucket<String> bucket2 = mock(RBucket.class);
+
+        doReturn(bucket1).when(redissonClient).getBucket("alert:dedup:STUCK_TX:WARN:tx1");
+        doReturn(false).when(bucket1).isExists();
+        doReturn(bucket2).when(redissonClient).getBucket("alert:dedup:STUCK_TX:WARN:tx2");
+        doReturn(false).when(bucket2).isExists();
+
+        alertService.alert("STUCK_TX", AlertLevel.WARN, "tx1 stuck", "tx1");
+        alertService.alert("STUCK_TX", AlertLevel.WARN, "tx2 stuck", "tx2");
+
+        verify(alertRecordMapper, times(2)).insert(any(AlertRecord.class));
+    }
+
+    // 11.2: same type/level/bizId within dedup window → second deduplicated
+    @Test
+    void alert_sameBizIdWithinDedupWindow_secondDeduplicated() {
+        @SuppressWarnings("unchecked")
+        RBucket<String> bucket = mock(RBucket.class);
+        doReturn(bucket).when(redissonClient).getBucket("alert:dedup:STUCK_TX:WARN:tx1");
+
+        doReturn(false).when(bucket).isExists();
+        alertService.alert("STUCK_TX", AlertLevel.WARN, "tx1 stuck", "tx1");
+
+        doReturn(true).when(bucket).isExists();
+        alertService.alert("STUCK_TX", AlertLevel.WARN, "tx1 stuck again", "tx1");
+
+        verify(alertRecordMapper, times(1)).insert(any(AlertRecord.class));
+    }
+
+    // 11.3: alert without bizId → backward compatible dedup by type+level
+    @Test
+    void alert_withoutBizId_backwardCompatibleDedup() {
+        @SuppressWarnings("unchecked")
+        RBucket<String> bucket = mock(RBucket.class);
+        doReturn(bucket).when(redissonClient).getBucket("alert:dedup:REORG:CRITICAL");
+        doReturn(false).when(bucket).isExists();
+
+        alertService.alert("REORG", AlertLevel.CRITICAL, "reorg at block 100");
+
+        verify(redissonClient).getBucket("alert:dedup:REORG:CRITICAL");
+        verify(alertRecordMapper).insert(any(AlertRecord.class));
+    }
 }
