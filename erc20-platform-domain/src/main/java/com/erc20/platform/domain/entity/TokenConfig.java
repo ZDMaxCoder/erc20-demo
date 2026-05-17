@@ -31,6 +31,9 @@ public class TokenConfig {
     private Long withdrawFeeAmount;
     private Long collectionThreshold;
     private String tokenType;
+    private String capabilities;
+    private String riskLevel;
+    private String circuitBreakerStatus;
     private Integer enabled;
     private Date createdAt;
     private Date updatedAt;

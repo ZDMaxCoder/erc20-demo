@@ -1,5 +1,6 @@
 package com.erc20.platform.blockchain.wallet;
 
+import com.erc20.platform.blockchain.adapter.ERC20Adapter;
 import com.erc20.platform.blockchain.erc20.SafeERC20Caller;
 import com.erc20.platform.blockchain.gas.GasEstimator;
 import com.erc20.platform.blockchain.gas.GasPrice;
@@ -18,17 +19,20 @@ import java.math.BigInteger;
 @Component
 public class CollectionTransactionSenderImpl implements CollectionTransactionSender {
 
+    private final ERC20Adapter erc20Adapter;
     private final WalletService walletService;
     private final SafeERC20Caller safeERC20Caller;
     private final GasEstimator gasEstimator;
     private final GasPriceCache gasPriceCache;
     private final Web3j web3j;
 
-    public CollectionTransactionSenderImpl(WalletService walletService,
+    public CollectionTransactionSenderImpl(ERC20Adapter erc20Adapter,
+                                           WalletService walletService,
                                            SafeERC20Caller safeERC20Caller,
                                            GasEstimator gasEstimator,
                                            GasPriceCache gasPriceCache,
                                            Web3j web3j) {
+        this.erc20Adapter = erc20Adapter;
         this.walletService = walletService;
         this.safeERC20Caller = safeERC20Caller;
         this.gasEstimator = gasEstimator;
@@ -67,6 +71,7 @@ public class CollectionTransactionSenderImpl implements CollectionTransactionSen
 
     @Override
     public TransactionRecord sendERC20Transfer(String from, String to, String contract, BigInteger amount) {
-        return walletService.sendERC20Transfer(from, to, contract, amount, GasPriority.MEDIUM);
+        String txHash = erc20Adapter.safeTransfer(from, contract, to, amount);
+        return TransactionRecord.builder().txHash(txHash).build();
     }
 }

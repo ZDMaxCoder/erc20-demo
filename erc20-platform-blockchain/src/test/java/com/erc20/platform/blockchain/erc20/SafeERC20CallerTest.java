@@ -33,6 +33,7 @@ class SafeERC20CallerTest {
 
     private static final String CONTRACT = "0xdac17f958d2ee523a2206206994597c13d831ec7";
     private static final String OWNER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private static final String SPENDER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     @BeforeEach
     void setUp() {
@@ -118,8 +119,6 @@ class SafeERC20CallerTest {
         assertEquals("MKR", result);
     }
 
-    // --- Task 10.1: safeBalanceOf empty response ---
-
     @Test
     void safeBalanceOf_emptyResponse_throwsRuntimeException() throws Exception {
         EthCall ethCallResponse = new EthCall();
@@ -133,8 +132,6 @@ class SafeERC20CallerTest {
         assertTrue(ex.getMessage().contains("balanceOf returned empty"));
     }
 
-    // --- Task 10.2: safeDecimals failure throws (no default 18) ---
-
     @Test
     void safeDecimals_failure_throwsRuntimeException() throws Exception {
         doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
@@ -142,8 +139,6 @@ class SafeERC20CallerTest {
 
         assertThrows(RuntimeException.class, () -> caller.safeDecimals(CONTRACT));
     }
-
-    // --- ChainCallException: no retry, immediate failure ---
 
     @Test
     void ethCall_ioException_throwsChainCallExceptionImmediately() throws Exception {
@@ -171,7 +166,70 @@ class SafeERC20CallerTest {
         assertTrue(ex.getMessage().contains("execution reverted"));
     }
 
-    // --- Task 10.4: decodeBytes32AsString with ABI dynamic offset ---
+    @Test
+    void safeTransfer_methodRemoved_noSuchMethod() {
+        assertThrows(NoSuchMethodException.class,
+                () -> SafeERC20Caller.class.getMethod("safeTransfer", String.class, String.class, BigInteger.class));
+    }
+
+    @Test
+    void safeApprove_methodRemoved_noSuchMethod() {
+        assertThrows(NoSuchMethodException.class,
+                () -> SafeERC20Caller.class.getMethod("safeApprove", String.class, String.class, BigInteger.class));
+    }
+
+    @Test
+    void safeAllowance_standardResponse_returnsCorrectBigInteger() throws Exception {
+        String allowanceHex = "0x00000000000000000000000000000000000000000000000000000000001e8480";
+        EthCall ethCall = new EthCall();
+        ethCall.setResult(allowanceHex);
+
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenReturn(ethCall);
+
+        BigInteger result = caller.safeAllowance(CONTRACT, OWNER, SPENDER);
+
+        assertEquals(new BigInteger("2000000"), result);
+    }
+
+    @Test
+    void safeAllowance_emptyResponse_throwsRuntimeException() throws Exception {
+        EthCall ethCall = new EthCall();
+        ethCall.setResult("0x");
+
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenReturn(ethCall);
+
+        RuntimeException ex = assertThrows(RuntimeException.class,
+                () -> caller.safeAllowance(CONTRACT, OWNER, SPENDER));
+        assertTrue(ex.getMessage().contains("allowance returned empty"));
+    }
+
+    @Test
+    void safeAllowance_zeroAllowance_returnsBigIntegerZero() throws Exception {
+        String zeroHex = "0x0000000000000000000000000000000000000000000000000000000000000000";
+        EthCall ethCall = new EthCall();
+        ethCall.setResult(zeroHex);
+
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenReturn(ethCall);
+
+        BigInteger result = caller.safeAllowance(CONTRACT, OWNER, SPENDER);
+
+        assertEquals(BigInteger.ZERO, result);
+    }
+
+    @Test
+    void safeAllowance_ioException_throwsChainCallException() throws Exception {
+        doReturn(ethCallRequest).when(web3j).ethCall(any(), any());
+        when(ethCallRequest.send()).thenThrow(new IOException("connection timeout"));
+
+        ChainCallException ex = assertThrows(ChainCallException.class,
+                () -> caller.safeAllowance(CONTRACT, OWNER, SPENDER));
+        assertEquals(CONTRACT, ex.getContract());
+        assertTrue(ex.getCause() instanceof IOException);
+        verify(ethCallRequest, times(1)).send();
+    }
 
     @Test
     void decodeBytes32AsString_dynamicOffset_decodesCorrectly() throws Exception {

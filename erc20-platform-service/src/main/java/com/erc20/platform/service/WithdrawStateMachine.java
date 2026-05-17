@@ -23,7 +23,7 @@ public class WithdrawStateMachine {
         map.put(WithdrawStatus.APPROVED, EnumSet.of(WithdrawStatus.SIGNING));
         map.put(WithdrawStatus.SIGNING, EnumSet.of(WithdrawStatus.BROADCASTING));
         map.put(WithdrawStatus.BROADCASTING, EnumSet.of(WithdrawStatus.PENDING_CONFIRM, WithdrawStatus.FAILED));
-        map.put(WithdrawStatus.PENDING_CONFIRM, EnumSet.of(WithdrawStatus.SUCCESS, WithdrawStatus.FAILED));
+        map.put(WithdrawStatus.PENDING_CONFIRM, EnumSet.of(WithdrawStatus.SUCCESS, WithdrawStatus.FAILED, WithdrawStatus.ANOMALY));
         map.put(WithdrawStatus.SUCCESS, EnumSet.of(WithdrawStatus.BROADCASTING));
         map.put(WithdrawStatus.FAILED, EnumSet.of(WithdrawStatus.APPROVED));
         this.transitions = Collections.unmodifiableMap(map);

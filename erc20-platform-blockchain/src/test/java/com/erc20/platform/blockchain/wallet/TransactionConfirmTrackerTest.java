@@ -1,7 +1,9 @@
 package com.erc20.platform.blockchain.wallet;
 
-import com.erc20.platform.blockchain.erc20.ERC20TransferEventParser;
-import com.erc20.platform.blockchain.erc20.TransferEvent;
+import com.erc20.platform.blockchain.adapter.ConsecutiveFailureBreaker;
+import com.erc20.platform.blockchain.adapter.TransferConfirmer;
+import com.erc20.platform.blockchain.adapter.model.TransferOutcome;
+import com.erc20.platform.blockchain.adapter.model.TransferResult;
 import com.erc20.platform.blockchain.nonce.NonceManager;
 import com.erc20.platform.common.enums.TxStatus;
 import com.erc20.platform.dal.mapper.TokenConfigMapper;
@@ -15,17 +17,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.web3j.protocol.Web3j;
-import org.web3j.protocol.core.Request;
-import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
 import java.math.BigInteger;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
-import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -36,11 +31,10 @@ class TransactionConfirmTrackerTest {
 
     @Mock private TransactionRecordMapper transactionRecordMapper;
     @Mock private NonceManager nonceManager;
-    @Mock private Web3j web3j;
+    @Mock private TransferConfirmer transferConfirmer;
     @Mock private RocketMQTemplate rocketMQTemplate;
-    @Mock private ERC20TransferEventParser transferEventParser;
     @Mock private TokenConfigMapper tokenConfigMapper;
-    @Mock private Request<?, EthGetTransactionReceipt> receiptRequest;
+    @Mock private ConsecutiveFailureBreaker consecutiveFailureBreaker;
 
     private TransactionConfirmTracker tracker;
 
@@ -53,48 +47,24 @@ class TransactionConfirmTrackerTest {
     @BeforeEach
     void setUp() {
         tracker = new TransactionConfirmTracker(
-                transactionRecordMapper, nonceManager, web3j, rocketMQTemplate,
-                transferEventParser, tokenConfigMapper, CHAIN_ID);
+                transactionRecordMapper, nonceManager, transferConfirmer, rocketMQTemplate,
+                tokenConfigMapper, consecutiveFailureBreaker, CHAIN_ID);
     }
 
-    // --- 8.1 PENDING tx with receipt status=1 + Transfer event → CONFIRMED, confirmNonce called ---
-
     @Test
-    void scanPending_receiptConfirmed_updatesToConfirmedAndCallsConfirmNonce() throws Exception {
+    void scanPending_receiptConfirmed_updatesToConfirmedAndCallsConfirmNonce() {
         TransactionRecord pendingTx = buildPendingTx();
-
         doReturn(Collections.singletonList(pendingTx))
                 .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
 
-        TokenConfig tokenConfig = TokenConfig.builder()
-                .id(TOKEN_ID)
-                .contractAddress(CONTRACT_ADDRESS)
+        TransferResult successResult = TransferResult.builder()
+                .outcome(TransferOutcome.SUCCESS)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(BigInteger.valueOf(1000000))
                 .build();
-        doReturn(tokenConfig).when(tokenConfigMapper).selectById(TOKEN_ID);
-
-        TransactionReceipt receipt = new TransactionReceipt();
-        receipt.setStatus("0x1");
-        receipt.setBlockNumber("0x64");
-        receipt.setBlockHash("0xblockhash");
-        receipt.setGasUsed("0x5208");
-        receipt.setLogs(new ArrayList<>());
-
-        List<TransferEvent> events = Collections.singletonList(
-                TransferEvent.builder()
-                        .contractAddress(CONTRACT_ADDRESS)
-                        .from(FROM)
-                        .to("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                        .value(BigInteger.valueOf(1000000))
-                        .txHash(TX_HASH)
-                        .blockNumber(100L)
-                        .logIndex(0)
-                        .build());
-        doReturn(events).when(transferEventParser).parseFromReceipt(receipt, CONTRACT_ADDRESS);
-
-        EthGetTransactionReceipt receiptResponse = new EthGetTransactionReceipt();
-        receiptResponse.setResult(receipt);
-        doReturn(receiptRequest).when(web3j).ethGetTransactionReceipt(TX_HASH);
-        doReturn(receiptResponse).when(receiptRequest).send();
+        doReturn(successResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
 
         tracker.scanPendingTransactions();
 
@@ -107,25 +77,15 @@ class TransactionConfirmTrackerTest {
         verify(nonceManager).confirmNonce(CHAIN_ID, FROM, 5L);
     }
 
-    // --- 8.2 Receipt status=0 → FAILED ---
-
     @Test
-    void scanPending_receiptFailed_updatesToFailed() throws Exception {
+    void scanPending_receiptFailed_updatesToFailed() {
         TransactionRecord pendingTx = buildPendingTx();
-
         doReturn(Collections.singletonList(pendingTx))
                 .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
 
-        TransactionReceipt receipt = new TransactionReceipt();
-        receipt.setStatus("0x0");
-        receipt.setBlockNumber("0x64");
-        receipt.setBlockHash("0xblockhash");
-        receipt.setGasUsed("0x5208");
-
-        EthGetTransactionReceipt receiptResponse = new EthGetTransactionReceipt();
-        receiptResponse.setResult(receipt);
-        doReturn(receiptRequest).when(web3j).ethGetTransactionReceipt(TX_HASH);
-        doReturn(receiptResponse).when(receiptRequest).send();
+        TransferResult failedResult = TransferResult.failed(TX_HASH, "receipt status failed");
+        doReturn(failedResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
 
         tracker.scanPendingTransactions();
 
@@ -137,64 +97,38 @@ class TransactionConfirmTrackerTest {
         verify(nonceManager, never()).confirmNonce(anyInt(), anyString(), anyLong());
     }
 
-    // --- 8.3 No receipt → stays PENDING ---
-
     @Test
-    void scanPending_noReceipt_staysPending() throws Exception {
+    void scanPending_noReceipt_staysPending() {
         TransactionRecord pendingTx = buildPendingTx();
-
         doReturn(Collections.singletonList(pendingTx))
                 .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
 
-        EthGetTransactionReceipt receiptResponse = new EthGetTransactionReceipt();
-        doReturn(receiptRequest).when(web3j).ethGetTransactionReceipt(TX_HASH);
-        doReturn(receiptResponse).when(receiptRequest).send();
+        TransferResult pendingResult = TransferResult.pending(TX_HASH);
+        doReturn(pendingResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
 
         tracker.scanPendingTransactions();
 
         verify(transactionRecordMapper, never()).updateById(any());
         verify(nonceManager, never()).confirmNonce(anyInt(), anyString(), anyLong());
+        verify(rocketMQTemplate, never()).convertAndSend(anyString(), any(TxStatusChangedMessage.class));
     }
 
-    // --- 3.2 Receipt 0x1 with Transfer event → CONFIRMED with actualAmount ---
-
     @Test
-    void checkConfirmation_receiptSuccessWithTransferEvent_confirmedWithActualAmount() throws Exception {
+    void checkConfirmation_receiptSuccessWithTransferEvent_confirmedWithActualAmount() {
         TransactionRecord pendingTx = buildPendingTx();
-
         doReturn(Collections.singletonList(pendingTx))
                 .when(transactionRecordMapper).selectList(any());
-
-        TokenConfig tokenConfig = TokenConfig.builder()
-                .id(TOKEN_ID)
-                .contractAddress(CONTRACT_ADDRESS)
-                .build();
-        doReturn(tokenConfig).when(tokenConfigMapper).selectById(TOKEN_ID);
-
-        TransactionReceipt receipt = new TransactionReceipt();
-        receipt.setStatus("0x1");
-        receipt.setBlockNumber("0x64");
-        receipt.setBlockHash("0xblockhash");
-        receipt.setGasUsed("0x5208");
-        receipt.setLogs(new ArrayList<>());
+        stubTokenConfig();
 
         BigInteger expectedAmount = BigInteger.valueOf(1000000);
-        List<TransferEvent> events = Collections.singletonList(
-                TransferEvent.builder()
-                        .contractAddress(CONTRACT_ADDRESS)
-                        .from(FROM)
-                        .to("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                        .value(expectedAmount)
-                        .txHash(TX_HASH)
-                        .blockNumber(100L)
-                        .logIndex(0)
-                        .build());
-        doReturn(events).when(transferEventParser).parseFromReceipt(receipt, CONTRACT_ADDRESS);
-
-        EthGetTransactionReceipt receiptResponse = new EthGetTransactionReceipt();
-        receiptResponse.setResult(receipt);
-        doReturn(receiptRequest).when(web3j).ethGetTransactionReceipt(TX_HASH);
-        doReturn(receiptResponse).when(receiptRequest).send();
+        TransferResult successResult = TransferResult.builder()
+                .outcome(TransferOutcome.SUCCESS)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(expectedAmount)
+                .build();
+        doReturn(successResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
 
         tracker.scanPendingTransactions();
 
@@ -205,34 +139,15 @@ class TransactionConfirmTrackerTest {
         assertEquals(expectedAmount, message.getActualAmount());
     }
 
-    // --- 3.3 Receipt 0x1 without Transfer event → FAILED ---
-
     @Test
-    void checkConfirmation_receiptSuccessNoTransferEvent_markedFailed() throws Exception {
+    void checkConfirmation_receiptSuccessNoTransferEvent_markedFailed() {
         TransactionRecord pendingTx = buildPendingTx();
-
         doReturn(Collections.singletonList(pendingTx))
                 .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
 
-        TokenConfig tokenConfig = TokenConfig.builder()
-                .id(TOKEN_ID)
-                .contractAddress(CONTRACT_ADDRESS)
-                .build();
-        doReturn(tokenConfig).when(tokenConfigMapper).selectById(TOKEN_ID);
-
-        TransactionReceipt receipt = new TransactionReceipt();
-        receipt.setStatus("0x1");
-        receipt.setBlockNumber("0x64");
-        receipt.setBlockHash("0xblockhash");
-        receipt.setGasUsed("0x5208");
-        receipt.setLogs(new ArrayList<>());
-
-        doReturn(Collections.emptyList()).when(transferEventParser).parseFromReceipt(receipt, CONTRACT_ADDRESS);
-
-        EthGetTransactionReceipt receiptResponse = new EthGetTransactionReceipt();
-        receiptResponse.setResult(receipt);
-        doReturn(receiptRequest).when(web3j).ethGetTransactionReceipt(TX_HASH);
-        doReturn(receiptResponse).when(receiptRequest).send();
+        TransferResult failedResult = TransferResult.failed(TX_HASH, "Transfer event not found");
+        doReturn(failedResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
 
         tracker.scanPendingTransactions();
 
@@ -240,13 +155,202 @@ class TransactionConfirmTrackerTest {
         verify(transactionRecordMapper).updateById(captor.capture());
         TransactionRecord updated = captor.getValue();
         assertEquals(TxStatus.FAILED.getCode(), updated.getStatus());
-        assertEquals("Transfer event not found in receipt", updated.getErrorMessage());
+        assertEquals("Transfer event not found", updated.getErrorMessage());
 
         ArgumentCaptor<TxStatusChangedMessage> msgCaptor = ArgumentCaptor.forClass(TxStatusChangedMessage.class);
         verify(rocketMQTemplate).convertAndSend(eq("tx-status-changed"), msgCaptor.capture());
         TxStatusChangedMessage message = msgCaptor.getValue();
         assertEquals(TxStatus.FAILED.getCode(), message.getToStatus());
         assertNull(message.getActualAmount());
+    }
+
+    @Test
+    void checkConfirmation_anomaly_publishesMessageWithAnomalyFlag() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
+
+        TransferResult anomalyResult = TransferResult.builder()
+                .outcome(TransferOutcome.ANOMALY)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(BigInteger.valueOf(900000))
+                .anomalyReason("Amount mismatch: expected 1000000, actual 900000")
+                .build();
+        doReturn(anomalyResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+
+        tracker.scanPendingTransactions();
+
+        ArgumentCaptor<TransactionRecord> txCaptor = ArgumentCaptor.forClass(TransactionRecord.class);
+        verify(transactionRecordMapper).updateById(txCaptor.capture());
+        assertEquals(TxStatus.CONFIRMED.getCode(), txCaptor.getValue().getStatus());
+
+        verify(nonceManager).confirmNonce(CHAIN_ID, FROM, 5L);
+
+        ArgumentCaptor<TxStatusChangedMessage> msgCaptor = ArgumentCaptor.forClass(TxStatusChangedMessage.class);
+        verify(rocketMQTemplate).convertAndSend(eq("tx-status-changed"), msgCaptor.capture());
+        TxStatusChangedMessage message = msgCaptor.getValue();
+        assertEquals(TxStatus.CONFIRMED.getCode(), message.getToStatus());
+        assertEquals(BigInteger.valueOf(900000), message.getActualAmount());
+        assertTrue(message.isAnomaly());
+        assertEquals("Amount mismatch: expected 1000000, actual 900000", message.getAnomalyReason());
+    }
+
+    @Test
+    void checkConfirmation_tokenWithDepositConfirmBlocks_passesMinConfirmations() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+
+        TokenConfig tokenConfig = TokenConfig.builder()
+                .id(TOKEN_ID)
+                .contractAddress(CONTRACT_ADDRESS)
+                .depositConfirmBlocks(12)
+                .build();
+        doReturn(tokenConfig).when(tokenConfigMapper).selectById(TOKEN_ID);
+
+        TransferResult successResult = TransferResult.builder()
+                .outcome(TransferOutcome.SUCCESS)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(BigInteger.valueOf(1000000))
+                .build();
+        doReturn(successResult).when(transferConfirmer)
+                .confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(12));
+
+        tracker.scanPendingTransactions();
+
+        verify(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(12));
+        verify(transactionRecordMapper).updateById(any());
+    }
+
+    @Test
+    void checkConfirmation_nullDepositConfirmBlocks_passesZeroMinConfirmations() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
+
+        TransferResult successResult = TransferResult.builder()
+                .outcome(TransferOutcome.SUCCESS)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(BigInteger.valueOf(1000000))
+                .build();
+        doReturn(successResult).when(transferConfirmer)
+                .confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+
+        tracker.scanPendingTransactions();
+
+        verify(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+    }
+
+    @Test
+    void checkConfirmation_success_publishesMessageWithAnomalyFalse() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
+
+        TransferResult successResult = TransferResult.builder()
+                .outcome(TransferOutcome.SUCCESS)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(BigInteger.valueOf(1000000))
+                .build();
+        doReturn(successResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+
+        tracker.scanPendingTransactions();
+
+        ArgumentCaptor<TxStatusChangedMessage> msgCaptor = ArgumentCaptor.forClass(TxStatusChangedMessage.class);
+        verify(rocketMQTemplate).convertAndSend(eq("tx-status-changed"), msgCaptor.capture());
+        TxStatusChangedMessage message = msgCaptor.getValue();
+        assertFalse(message.isAnomaly());
+        assertNull(message.getAnomalyReason());
+    }
+
+    @Test
+    void checkConfirmation_success_callsBreakerRecordSuccess() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
+
+        TransferResult successResult = TransferResult.builder()
+                .outcome(TransferOutcome.SUCCESS)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(BigInteger.valueOf(1000000))
+                .build();
+        doReturn(successResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+
+        tracker.scanPendingTransactions();
+
+        verify(consecutiveFailureBreaker).recordSuccess(CONTRACT_ADDRESS);
+        verify(consecutiveFailureBreaker, never()).recordFailure(anyString());
+    }
+
+    @Test
+    void checkConfirmation_failed_callsBreakerRecordFailure() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
+
+        TransferResult failedResult = TransferResult.failed(TX_HASH, "receipt status failed");
+        doReturn(failedResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+
+        tracker.scanPendingTransactions();
+
+        verify(consecutiveFailureBreaker).recordFailure(CONTRACT_ADDRESS);
+        verify(consecutiveFailureBreaker, never()).recordSuccess(anyString());
+    }
+
+    @Test
+    void checkConfirmation_anomaly_doesNotCallBreaker() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
+
+        TransferResult anomalyResult = TransferResult.builder()
+                .outcome(TransferOutcome.ANOMALY)
+                .txHash(TX_HASH)
+                .blockNumber(100L)
+                .actualAmount(BigInteger.valueOf(900000))
+                .anomalyReason("Amount mismatch")
+                .build();
+        doReturn(anomalyResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+
+        tracker.scanPendingTransactions();
+
+        verify(consecutiveFailureBreaker, never()).recordSuccess(anyString());
+        verify(consecutiveFailureBreaker, never()).recordFailure(anyString());
+    }
+
+    @Test
+    void checkConfirmation_pending_doesNotCallBreaker() {
+        TransactionRecord pendingTx = buildPendingTx();
+        doReturn(Collections.singletonList(pendingTx))
+                .when(transactionRecordMapper).selectList(any());
+        stubTokenConfig();
+
+        TransferResult pendingResult = TransferResult.pending(TX_HASH);
+        doReturn(pendingResult).when(transferConfirmer).confirm(eq(TX_HASH), eq(CONTRACT_ADDRESS), any(), any(), eq(0));
+
+        tracker.scanPendingTransactions();
+
+        verify(consecutiveFailureBreaker, never()).recordSuccess(anyString());
+        verify(consecutiveFailureBreaker, never()).recordFailure(anyString());
+    }
+
+    private void stubTokenConfig() {
+        TokenConfig tokenConfig = TokenConfig.builder()
+                .id(TOKEN_ID)
+                .contractAddress(CONTRACT_ADDRESS)
+                .build();
+        doReturn(tokenConfig).when(tokenConfigMapper).selectById(TOKEN_ID);
     }
 
     private TransactionRecord buildPendingTx() {

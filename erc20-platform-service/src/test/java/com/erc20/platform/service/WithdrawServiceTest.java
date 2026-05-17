@@ -497,7 +497,7 @@ class WithdrawServiceTest {
     }
 
     // ============================
-    // 9.1 confirmWithdraw — happy path
+    // 9.1 confirmWithdraw — happy path (with matching actualAmount)
     // ============================
 
     @Test
@@ -516,8 +516,10 @@ class WithdrawServiceTest {
                 .build();
         doReturn(record).when(withdrawRecordMapper).selectById(1L);
         doReturn(1).when(withdrawRecordMapper).updateById(any());
+        doReturn(buildTokenConfig()).when(tokenConfigMapper).selectOne(any(LambdaQueryWrapper.class));
 
-        withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L);
+        BigInteger matchingAmount = BigInteger.valueOf(10000000L);
+        withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L, matchingAmount);
 
         assertEquals(WithdrawStatus.SUCCESS.getCode(), record.getStatus());
 
@@ -682,11 +684,11 @@ class WithdrawServiceTest {
     }
 
     // ============================
-    // 5.2 confirmWithdraw — mismatched actualAmount → alert raised, still confirmed
+    // 5.2 confirmWithdraw — mismatched actualAmount → ANOMALY, no decreaseFrozen, alert
     // ============================
 
     @Test
-    void confirmWithdraw_mismatchedActualAmount_alertRaisedButStillConfirmed() throws Exception {
+    void confirmWithdraw_mismatchedActualAmount_statusAnomalyNoDecreaseFrozenAndAlertRaised() throws Exception {
         stubLock();
 
         WithdrawRecord record = WithdrawRecord.builder()
@@ -707,16 +709,47 @@ class WithdrawServiceTest {
 
         withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L, mismatchedAmount);
 
-        assertEquals(WithdrawStatus.SUCCESS.getCode(), record.getStatus());
+        assertEquals(WithdrawStatus.ANOMALY.getCode(), record.getStatus());
+        verify(accountService, never()).decreaseFrozen(any());
         verify(alertService).alert(eq("WITHDRAW_AMOUNT_MISMATCH"), eq(AlertLevel.CRITICAL), anyString());
     }
 
     // ============================
-    // 5.3 confirmWithdraw — null actualAmount → no comparison, confirm normally
+    // 5.2.1 confirmWithdraw — anomaly=true from message → ANOMALY, no decreaseFrozen, alert
     // ============================
 
     @Test
-    void confirmWithdraw_nullActualAmount_noComparisonConfirmNormally() throws Exception {
+    void confirmWithdraw_anomalyFlagTrue_statusAnomalyNoDecreaseFrozenAndAlertRaised() throws Exception {
+        stubLock();
+
+        WithdrawRecord record = WithdrawRecord.builder()
+                .id(1L)
+                .userId(USER_ID)
+                .tokenId(TOKEN_ID)
+                .amount(1000L)
+                .feeAmount(10L)
+                .amountExponent(2)
+                .txHash("0xtxhash001")
+                .status(WithdrawStatus.PENDING_CONFIRM.getCode())
+                .build();
+        doReturn(record).when(withdrawRecordMapper).selectById(1L);
+        doReturn(1).when(withdrawRecordMapper).updateById(any());
+
+        String anomalyReason = "Amount mismatch: expected=10000000, actual=5000000";
+        withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L,
+                BigInteger.valueOf(5000000L), true, anomalyReason);
+
+        assertEquals(WithdrawStatus.ANOMALY.getCode(), record.getStatus());
+        verify(accountService, never()).decreaseFrozen(any());
+        verify(alertService).alert(eq("WITHDRAW_AMOUNT_MISMATCH"), eq(AlertLevel.CRITICAL), eq(anomalyReason));
+    }
+
+    // ============================
+    // 5.3 confirmWithdraw — null actualAmount → ANOMALY, no decreaseFrozen
+    // ============================
+
+    @Test
+    void confirmWithdraw_nullActualAmount_statusAnomaly() throws Exception {
         stubLock();
 
         WithdrawRecord record = WithdrawRecord.builder()
@@ -734,7 +767,7 @@ class WithdrawServiceTest {
 
         withdrawService.confirmWithdraw(1L, "0xtxhash001", 12345L, null);
 
-        assertEquals(WithdrawStatus.SUCCESS.getCode(), record.getStatus());
-        verify(alertService, never()).alert(anyString(), any(AlertLevel.class), anyString());
+        assertEquals(WithdrawStatus.ANOMALY.getCode(), record.getStatus());
+        verify(accountService, never()).decreaseFrozen(any());
     }
 }

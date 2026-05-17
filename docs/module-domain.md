@@ -12,7 +12,7 @@
 
 | 实体类 | 对应表 | 说明 |
 |--------|--------|------|
-| `TokenConfig` | t_token_config | 代币配置（合约地址、decimals、费率、开关） |
+| `TokenConfig` | t_token_config | 代币配置（合约地址、decimals、费率、开关、类型、能力、风险、熔断） |
 | `UserAddress` | t_user_address | 用户充值地址绑定 |
 | `DepositRecord` | t_deposit_record | 充值记录 |
 | `WithdrawRecord` | t_withdraw_record | 提现记录 |
@@ -47,30 +47,47 @@ private int amountExponent;
 
 ### TokenConfig
 ```
-id, symbol, contractAddress, chainId, decimals, amountExponent,
-enabled, minDepositAmount, withdrawFeeAmount, collectionThreshold,
-depositConfirmBlocks
+id, tokenName, tokenSymbol, contractAddress, decimals, amountExponent,
+chainId, depositConfirmBlocks, minDepositAmount, minWithdrawAmount,
+withdrawFeeAmount, collectionThreshold, tokenType, capabilities,
+riskLevel, circuitBreakerStatus, enabled, createdAt, updatedAt
 ```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `tokenName` | String | 代币名称 |
+| `tokenSymbol` | String | 代币符号 |
+| `contractAddress` | String | 合约地址（小写存储） |
+| `decimals` | Integer | 链上精度 |
+| `amountExponent` | Integer | 平台存储精度 |
+| `chainId` | Integer | 链 ID |
+| `tokenType` | String | 类型: STANDARD/FEE_ON_TRANSFER/REBASING/UNSUPPORTED |
+| `capabilities` | String | 能力标签（逗号分隔，对应 TokenCapability 枚举） |
+| `riskLevel` | String | 风险等级: LOW/MEDIUM/HIGH/CRITICAL |
+| `circuitBreakerStatus` | String | 熔断状态: CLOSED/OPEN（默认 CLOSED） |
+| `enabled` | Integer | 启用状态 |
 
 ### AccountBalance
 ```
-userId, tokenId, availableBalance, frozenBalance, amountExponent, version
+id, userId, tokenId, availableBalance, frozenBalance, amountExponent, version,
+createdAt, updatedAt
 ```
 
-其中 `version` 字段用于乐观锁控制并发更新。
+其中 `version` 字段（`@Version`）用于乐观锁控制并发更新。
 
 ### DepositRecord
 ```
-txHash, logIndex, idempotentKey, chainId, userId, tokenId,
+id, txHash, logIndex, idempotentKey, userId, chainId, tokenId,
 fromAddress, toAddress, amount, amountExponent, status,
-blockNumber, blockHash, confirmations, requiredConfirmations, credited
+blockNumber, blockHash, confirmations, requiredConfirmations, credited,
+createdAt, updatedAt
 ```
 
 ### WithdrawRecord
 ```
-requestId, idempotentKey, chainId, userId, tokenId, toAddress,
-amount, amountExponent, feeAmount, status, txHash,
-retryCount, errorMessage
+id, requestId, idempotentKey, userId, chainId, tokenId, toAddress,
+amount, amountExponent, feeAmount, status, txHash, errorMessage,
+retryCount, createdAt, updatedAt
 ```
 
 ## 注解使用

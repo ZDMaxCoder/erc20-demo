@@ -15,4 +15,6 @@ public class TxStatusChangedMessage {
     private Long blockNumber;
     private String blockHash;
     private BigInteger actualAmount;
+    private boolean anomaly;
+    private String anomalyReason;
 }

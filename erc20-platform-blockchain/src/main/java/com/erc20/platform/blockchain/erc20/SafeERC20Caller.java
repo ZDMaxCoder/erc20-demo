@@ -15,15 +15,14 @@ import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.request.Transaction;
 import org.web3j.protocol.core.methods.response.EthCall;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.utils.Numeric;
 
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 @Slf4j
 @Component
@@ -114,15 +113,24 @@ public class SafeERC20Caller {
         return decodeBytes32AsString(result);
     }
 
-    public CompletableFuture<TransactionReceipt> safeTransfer(String contract, String to, BigInteger amount) {
-        throw new UnsupportedOperationException("safeTransfer requires transaction signing, not yet implemented");
+    public BigInteger safeAllowance(String contract, String owner, String spender) {
+        Function function = new Function(
+                "allowance",
+                Arrays.asList(new Address(owner), new Address(spender)),
+                Collections.singletonList(new TypeReference<Uint256>() {})
+        );
+        String result = ethCall(contract, function);
+        if (result == null || result.equals("0x") || result.isEmpty()) {
+            throw new RuntimeException("allowance returned empty for " + contract);
+        }
+        List<org.web3j.abi.datatypes.Type> decoded = FunctionReturnDecoder.decode(result, function.getOutputParameters());
+        if (decoded.isEmpty()) {
+            throw new RuntimeException("allowance returned empty for " + contract);
+        }
+        return ((Uint256) decoded.get(0)).getValue();
     }
 
-    public CompletableFuture<TransactionReceipt> safeApprove(String contract, String spender, BigInteger amount) {
-        throw new UnsupportedOperationException("safeApprove requires transaction signing, not yet implemented");
-    }
-
-    private String ethCall(String contract, Function function) {
+private String ethCall(String contract, Function function) {
         String encodedFunction = FunctionEncoder.encode(function);
         try {
             EthCall response = web3j.ethCall(

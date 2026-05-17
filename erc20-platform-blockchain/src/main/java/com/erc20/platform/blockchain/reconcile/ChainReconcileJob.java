@@ -1,7 +1,7 @@
 package com.erc20.platform.blockchain.reconcile;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.erc20.platform.blockchain.erc20.SafeERC20Caller;
+import com.erc20.platform.blockchain.adapter.ERC20Adapter;
 import com.erc20.platform.common.enums.AlertLevel;
 import com.erc20.platform.common.util.AmountUtil;
 import com.erc20.platform.dal.mapper.AccountBalanceMapper;
@@ -22,18 +22,18 @@ import java.util.List;
 @Component
 public class ChainReconcileJob {
 
-    private final SafeERC20Caller safeERC20Caller;
+    private final ERC20Adapter erc20Adapter;
     private final TokenConfigMapper tokenConfigMapper;
     private final WalletConfigMapper walletConfigMapper;
     private final AccountBalanceMapper accountBalanceMapper;
     private final AlertService alertService;
 
-    public ChainReconcileJob(SafeERC20Caller safeERC20Caller,
+    public ChainReconcileJob(ERC20Adapter erc20Adapter,
                              TokenConfigMapper tokenConfigMapper,
                              WalletConfigMapper walletConfigMapper,
                              AccountBalanceMapper accountBalanceMapper,
                              AlertService alertService) {
-        this.safeERC20Caller = safeERC20Caller;
+        this.erc20Adapter = erc20Adapter;
         this.tokenConfigMapper = tokenConfigMapper;
         this.walletConfigMapper = walletConfigMapper;
         this.accountBalanceMapper = accountBalanceMapper;
@@ -45,7 +45,7 @@ public class ChainReconcileJob {
         log.info("Starting chain balance reconciliation");
 
         List<TokenConfig> tokens = tokenConfigMapper.selectList(
-                new LambdaQueryWrapper<TokenConfig>().eq(TokenConfig::getEnabled, 1));
+                new LambdaQueryWrapper<TokenConfig>());
 
         WalletConfig hotWallet = walletConfigMapper.selectOne(
                 new LambdaQueryWrapper<WalletConfig>()
@@ -71,7 +71,7 @@ public class ChainReconcileJob {
     }
 
     private void reconcileToken(TokenConfig token, WalletConfig hotWallet) {
-        BigInteger onChainBalance = safeERC20Caller.safeBalanceOf(
+        BigInteger onChainBalance = erc20Adapter.balanceOf(
                 token.getContractAddress(), hotWallet.getAddress());
 
         long onChainMinUnit = AmountUtil.fromChainAmount(

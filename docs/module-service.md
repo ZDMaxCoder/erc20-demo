@@ -26,15 +26,43 @@ service/
 ├── CollectionService.java       — 归集服务
 ├── CollectionScanJob.java       — 归集扫描任务
 ├── CollectionTriggerService.java — 归集触发
+├── CollectionProperties.java    — @ConfigurationProperties(prefix="collection")
 ├── GasSupplyService.java        — Gas补给服务
 ├── AddressService.java          — 地址分配服务
 ├── HdWalletService.java         — HD钱包派生
 ├── WalletTransferService.java   — 钱包转账封装
 ├── AlertService.java            — 告警服务
+├── AlertProperties.java         — @ConfigurationProperties(prefix="alert")
 ├── dto/                         — 内部数据传输对象
+│   ├── AccountOperateRequest.java
+│   ├── AlertMessage.java
+│   ├── DepositConfirmedMessage.java
+│   ├── GeneratedAddress.java
+│   ├── TransferEventDTO.java
+│   ├── WithdrawExecuteMessage.java
+│   └── WithdrawRequest.java
 ├── gateway/                     — 网关接口（MQ发布、链交互抽象）
+│   ├── WithdrawTransactionSender.java
+│   ├── WithdrawMessagePublisher.java
+│   ├── CollectionTransactionSender.java
+│   └── AlertMessagePublisher.java
 ├── risk/                        — 风控子模块
+│   ├── RiskControlService.java  — 规则引擎主服务
+│   ├── RiskRule.java            — 风控规则接口（check + order）
+│   ├── RiskResult.java          — 风控结果（status + reason）
+│   ├── RiskStatus.java          — 结果枚举: AUTO_PASS, NEED_MANUAL_REVIEW, REJECT
+│   ├── RiskProperties.java      — @ConfigurationProperties(prefix="risk.withdraw")
+│   ├── AddressBlacklistService.java — Redis + DB 黑名单检查服务
+│   ├── WithdrawLimitService.java — Redis 每日/每小时提现限额追踪
+│   └── rule/                    — 具体规则实现
+│       ├── AddressBlacklistRule.java
+│       ├── AmountLimitRule.java
+│       ├── LargeAmountRule.java
+│       ├── FrequencyRule.java
+│       └── NewAddressRule.java
 └── monitoring/                  — 监控指标
+    ├── BusinessMetrics.java     — Micrometer Counter 指标
+    └── GaugeRegistrar.java      — Micrometer Gauge 注册（pending withdraws, nonce records）
 ```
 
 ## 核心服务详解
@@ -70,9 +98,15 @@ Transfer事件 → onTransferEvent()
 
 ```
 PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM → SUCCESS
-      ↓                                                                    
-   REJECTED                                                  FAILED
+      ↓                          ↑                         ↓        ↑
+   REJECTED                      └── FAILED ←──────────────┘        │
+                                                                     ↓
+                                              SUCCESS → BROADCASTING (reorg revert)
+                                              PENDING_CONFIRM → ANOMALY (金额不一致)
 ```
+
+正向流转: PENDING_REVIEW→APPROVED→SIGNING→BROADCASTING→PENDING_CONFIRM→SUCCESS/FAILED/ANOMALY
+逆向流转: SUCCESS→BROADCASTING（reorg回退）, FAILED→APPROVED（重试）
 
 **关键方法**：
 
@@ -81,7 +115,7 @@ PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM →
 | `createWithdraw` | 创建提现（幂等检查 → 冻结余额 → 风控评估 → 自动通过/拒绝/人工审核） |
 | `approve/reject` | 审批/拒绝（状态流转 + 资金操作） |
 | `executeWithdraw` | 执行提现（分布式锁 → 发送链上交易） |
-| `confirmWithdraw` | 确认提现（验证 actualAmount → 扣减冻结 + 扣手续费） |
+| `confirmWithdraw` | 确认提现（验证 actualAmount → 扣减冻结 + 扣手续费），金额不一致时转 ANOMALY |
 | `failWithdraw` | 提现失败（解冻资金） |
 | `revertConfirmedWithdraw` | Reorg 回退（已确认提现恢复到 BROADCASTING 状态） |
 
@@ -125,6 +159,13 @@ PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM →
 - 同地址同代币不创建重复活跃任务
 - 最小归集间隔控制（configurable hours）
 
+**CollectionProperties 配置**：
+- `enabled` — 归集开关
+- `gasBufferMultiplier` — Gas 缓冲倍数
+- `targetAddress` — 归集目标地址
+- `batchSize` — 批量扫描大小
+- `minIntervalHours` — 最小归集间隔
+
 ### RiskControlService（风控服务）
 
 规则引擎模式，按优先级执行：
@@ -133,12 +174,22 @@ PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM →
 |------|--------|------|
 | `AddressBlacklistRule` | 1 | 黑名单地址直接拒绝 |
 | `AmountLimitRule` | 2 | 单笔金额超限拒绝 |
-| `LargeAmountRule` | 3 | 大额需人工审核 |
-| `FrequencyRule` | 4 | 高频提现需人工审核 |
-| `NewAddressRule` | 5 | 新地址首次提现需审核 |
+| `FrequencyRule` | 3 | 高频提现需人工审核 |
+| `NewAddressRule` | 4 | 新地址首次提现需审核 |
+| `LargeAmountRule` | 5 | 大额需人工审核 |
+
+**风控架构**：
+- `RiskRule` 接口定义 `check()` 和 `order()` 方法
+- `RiskResult` 携带 `RiskStatus` + 原因描述
+- `RiskStatus` 枚举: AUTO_PASS, NEED_MANUAL_REVIEW, REJECT
+- `RiskProperties` 可配置: autoPassMaxAmount, dailyLimit 等阈值
+
+**支撑服务**：
+- `AddressBlacklistService` — Redis 缓存 + DB 查询，支持动态黑名单
+- `WithdrawLimitService` — Redis 统计每日/每小时提现金额，实时限额控制
 
 **风控结果**：
-- `PASS` — 直接通过
+- `AUTO_PASS` — 直接通过
 - `NEED_MANUAL_REVIEW` — 需人工审核（聚合多条原因）
 - `REJECT` — 直接拒绝（遇到即停止后续规则）
 
@@ -149,32 +200,44 @@ PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM →
 - 从热钱包发送 ETH 到用户地址
 - 确认到账后触发归集
 
-### 定时任务
-
-| 任务 | 间隔 | 说明 |
-|------|------|------|
-| `DepositConfirmJob` | 10s | 检查 CONFIRMING 充值是否达到确认块数（分页 500 条/批） |
-| `WithdrawRetryJob` | 30s | 重试卡住的提现（SIGNING 超时、BROADCASTING 超时、APPROVED 超时） |
-| `CollectionScanJob` | 配置化 | 扫描需要归集的地址（含溢出保护） |
-| `AccountReconcileJob` | 1h | 余额流水对账 |
-
 ### AlertService（告警服务）
 
 统一告警入口，支持：
 - Redis 去重（可选 bizId 细粒度去重，避免不同业务实体的同类告警被压制）
 - DB 持久化告警记录
 - WARN/CRITICAL 级别通过 MQ 推送
+- `AlertProperties.dedupIntervalMinutes` 控制去重窗口
 
-### 监控指标（BusinessMetrics）
+### 定时任务
 
-通过 Micrometer 暴露业务指标：
+| 任务 | 间隔 | 说明 |
+|------|------|------|
+| `DepositConfirmJob` | 10s (fixedDelay) | 检查 CONFIRMING 充值是否达到确认块数（分页 500 条/批） |
+| `WithdrawRetryJob` | 30s (fixedDelay) | 重试卡住的提现（SIGNING 超时、BROADCASTING 超时、APPROVED 超时） |
+| `CollectionScanJob` | 每 4 小时 (cron: `0 0 */4 * * ?`) | 扫描需要归集的地址，配置开关控制 |
+| `AccountReconcileJob.fullScan` | 每日 2:00 AM (cron: `0 0 2 * * ?`) | 全量余额-流水对账（分页 200 条/批） |
+| `AccountReconcileJob.sampleScan` | 每小时 (cron: `0 0 * * * ?`) | 抽样对账（最近更新的 100 条余额记录） |
+
+### 监控指标
+
+**BusinessMetrics**：
 
 | 指标名 | 类型 | 说明 |
 |--------|------|------|
 | `deposit.count` | Counter | 充值成功计数 |
 | `withdraw.count` | Counter | 提现成功计数 |
 | `collection.count` | Counter | 归集成功计数 |
-| `block.synced` | Counter | 已同步区块数 |
+| `block.synced.count` | Counter | 已同步区块数 |
+| `reorg.count` | Counter | 链重组检测计数 |
+| `deposit.confirm.duration` | Timer | 充值确认耗时（毫秒） |
+| `withdraw.process.duration` | Timer | 提现处理耗时（毫秒） |
+
+**GaugeRegistrar**（Gauge）：
+
+| 指标名 | 类型 | 说明 |
+|--------|------|------|
+| `pending.withdraw.count` | Gauge | 待审批提现数量（PENDING_REVIEW 状态） |
+| `pending.nonce.count` | Gauge | 待确认 nonce 总数（所有钱包 pendingCount 之和） |
 
 ## Gateway 接口
 
@@ -182,23 +245,14 @@ PENDING_REVIEW → APPROVED → SIGNING → BROADCASTING → PENDING_CONFIRM →
 
 | 接口 | 实现模块 | 说明 |
 |------|----------|------|
-| `WithdrawTransactionSender` | blockchain | 提现交易发送 |
+| `WithdrawTransactionSender` | blockchain | 提现交易发送（通过 ERC20Adapter 门面） |
 | `WithdrawMessagePublisher` | mq | 提现消息发布 |
-| `CollectionTransactionSender` | blockchain | 归集交易发送 |
+| `CollectionTransactionSender` | blockchain | 归集交易发送（通过 ERC20Adapter 门面） |
 | `AlertMessagePublisher` | mq | 告警消息发布 |
-
-## 测试覆盖
-
-16 个测试类，覆盖：
-- 充值全流程（事件处理、确认、Reorg）
-- 提现状态机流转
-- 账户余额并发操作
-- 归集扫描与执行
-- 风控规则组合
-- 重试任务
 
 ## 依赖关系
 
 - 依赖 `erc20-platform-common`、`erc20-platform-domain`、`erc20-platform-dal`
-- Redisson（分布式锁）
+- Redisson（分布式锁、限额统计）
 - Spring Transaction
+- Micrometer（监控指标）

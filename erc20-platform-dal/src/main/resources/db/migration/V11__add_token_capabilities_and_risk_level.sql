@@ -1,0 +1,2 @@
+ALTER TABLE t_token_config ADD COLUMN capabilities VARCHAR(512) DEFAULT NULL COMMENT 'token能力标签,逗号分隔';
+ALTER TABLE t_token_config ADD COLUMN risk_level VARCHAR(16) DEFAULT 'LOW' COMMENT '风险等级:LOW/MEDIUM/HIGH/CRITICAL';

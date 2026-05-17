@@ -1,8 +1,10 @@
 package com.erc20.platform.blockchain.wallet;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.erc20.platform.blockchain.erc20.ERC20TransferEventParser;
-import com.erc20.platform.blockchain.erc20.TransferEvent;
+import com.erc20.platform.blockchain.adapter.ConsecutiveFailureBreaker;
+import com.erc20.platform.blockchain.adapter.TransferConfirmer;
+import com.erc20.platform.blockchain.adapter.model.TransferOutcome;
+import com.erc20.platform.blockchain.adapter.model.TransferResult;
 import com.erc20.platform.blockchain.nonce.NonceManager;
 import com.erc20.platform.common.enums.TxStatus;
 import com.erc20.platform.dal.mapper.TokenConfigMapper;
@@ -14,14 +16,10 @@ import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.web3j.protocol.Web3j;
-import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
 import java.math.BigInteger;
 import java.util.Date;
 import java.util.List;
-import java.util.Optional;
 
 @Slf4j
 @Component
@@ -31,25 +29,25 @@ public class TransactionConfirmTracker {
 
     private final TransactionRecordMapper transactionRecordMapper;
     private final NonceManager nonceManager;
-    private final Web3j web3j;
+    private final TransferConfirmer transferConfirmer;
     private final RocketMQTemplate rocketMQTemplate;
-    private final ERC20TransferEventParser transferEventParser;
     private final TokenConfigMapper tokenConfigMapper;
+    private final ConsecutiveFailureBreaker consecutiveFailureBreaker;
     private final int chainId;
 
     public TransactionConfirmTracker(TransactionRecordMapper transactionRecordMapper,
                                      NonceManager nonceManager,
-                                     Web3j web3j,
+                                     TransferConfirmer transferConfirmer,
                                      RocketMQTemplate rocketMQTemplate,
-                                     ERC20TransferEventParser transferEventParser,
                                      TokenConfigMapper tokenConfigMapper,
+                                     ConsecutiveFailureBreaker consecutiveFailureBreaker,
                                      @Value("${blockchain.sync.chain-id:1}") int chainId) {
         this.transactionRecordMapper = transactionRecordMapper;
         this.nonceManager = nonceManager;
-        this.web3j = web3j;
+        this.transferConfirmer = transferConfirmer;
         this.rocketMQTemplate = rocketMQTemplate;
-        this.transferEventParser = transferEventParser;
         this.tokenConfigMapper = tokenConfigMapper;
+        this.consecutiveFailureBreaker = consecutiveFailureBreaker;
         this.chainId = chainId;
     }
 
@@ -70,77 +68,83 @@ public class TransactionConfirmTracker {
 
     private void checkConfirmation(TransactionRecord tx) {
         try {
-            EthGetTransactionReceipt receiptResponse = web3j
-                    .ethGetTransactionReceipt(tx.getTxHash()).send();
-            Optional<TransactionReceipt> receiptOpt = receiptResponse.getTransactionReceipt();
-
-            if (!receiptOpt.isPresent()) {
+            TokenConfig tokenConfig = resolveTokenConfig(tx.getTokenId());
+            if (tokenConfig == null || tokenConfig.getContractAddress() == null) {
+                log.warn("No contract address for tx {} (tokenId={}), skipping", tx.getTxHash(), tx.getTokenId());
                 return;
             }
 
-            TransactionReceipt receipt = receiptOpt.get();
+            String contractAddress = tokenConfig.getContractAddress();
+            int minConfirmations = tokenConfig.getDepositConfirmBlocks() != null
+                    ? tokenConfig.getDepositConfirmBlocks() : 0;
+
+            BigInteger expectedAmount = tx.getAmount() != null ? BigInteger.valueOf(tx.getAmount()) : null;
+            TransferResult result = transferConfirmer.confirm(
+                    tx.getTxHash(), contractAddress, expectedAmount, tx.getToAddress(), minConfirmations);
+
+            TransferOutcome outcome = result.getOutcome();
+            if (outcome == TransferOutcome.PENDING) {
+                return;
+            }
+
             String previousStatus = tx.getStatus();
-
-            tx.setBlockNumber(receipt.getBlockNumber().longValue());
-            tx.setBlockHash(receipt.getBlockHash());
-            tx.setGasUsed(receipt.getGasUsed().longValue());
             tx.setUpdatedAt(new Date());
+            if (result.getBlockNumber() != null) {
+                tx.setBlockNumber(result.getBlockNumber());
+            }
 
-            if ("0x1".equals(receipt.getStatus())) {
-                BigInteger actualAmount = verifyTransferEvent(tx, receipt);
-                if (actualAmount != null) {
+            switch (outcome) {
+                case SUCCESS:
+                    tx.setStatus(TxStatus.CONFIRMED.getCode());
+                    transactionRecordMapper.updateById(tx);
+                    nonceManager.confirmNonce(chainId, tx.getFromAddress(), tx.getNonce());
+                    consecutiveFailureBreaker.recordSuccess(contractAddress);
+                    publishStatusChange(tx.getTxHash(), previousStatus, TxStatus.CONFIRMED.getCode(),
+                            tx.getBlockNumber(), result.getActualAmount(), false, null);
+                    break;
+                case ANOMALY:
                     tx.setStatus(TxStatus.CONFIRMED.getCode());
                     transactionRecordMapper.updateById(tx);
                     nonceManager.confirmNonce(chainId, tx.getFromAddress(), tx.getNonce());
                     publishStatusChange(tx.getTxHash(), previousStatus, TxStatus.CONFIRMED.getCode(),
-                            tx.getBlockNumber(), tx.getBlockHash(), actualAmount);
-                } else {
+                            tx.getBlockNumber(), result.getActualAmount(), true, result.getAnomalyReason());
+                    break;
+                case FAILED:
                     tx.setStatus(TxStatus.FAILED.getCode());
-                    tx.setErrorMessage("Transfer event not found in receipt");
+                    tx.setErrorMessage(result.getAnomalyReason());
                     transactionRecordMapper.updateById(tx);
+                    consecutiveFailureBreaker.recordFailure(contractAddress);
                     publishStatusChange(tx.getTxHash(), previousStatus, TxStatus.FAILED.getCode(),
-                            tx.getBlockNumber(), tx.getBlockHash(), null);
-                }
-            } else {
-                tx.setStatus(TxStatus.FAILED.getCode());
-                transactionRecordMapper.updateById(tx);
-                publishStatusChange(tx.getTxHash(), previousStatus, TxStatus.FAILED.getCode(),
-                        tx.getBlockNumber(), tx.getBlockHash(), null);
+                            tx.getBlockNumber(), null, false, null);
+                    break;
+                default:
+                    log.warn("Unexpected outcome {} for tx {}", outcome, tx.getTxHash());
+                    break;
             }
         } catch (Exception e) {
             log.error("Failed to check confirmation for tx {}", tx.getTxHash(), e);
         }
     }
 
-    private BigInteger verifyTransferEvent(TransactionRecord tx, TransactionReceipt receipt) {
-        if (tx.getTokenId() == null) {
+    private TokenConfig resolveTokenConfig(Long tokenId) {
+        if (tokenId == null) {
             return null;
         }
-        TokenConfig tokenConfig = tokenConfigMapper.selectById(tx.getTokenId());
-        if (tokenConfig == null || tokenConfig.getContractAddress() == null) {
-            return null;
-        }
-        List<TransferEvent> events = transferEventParser.parseFromReceipt(receipt, tokenConfig.getContractAddress());
-        if (events.isEmpty()) {
-            return null;
-        }
-        BigInteger totalAmount = BigInteger.ZERO;
-        for (TransferEvent event : events) {
-            totalAmount = totalAmount.add(event.getValue());
-        }
-        return totalAmount;
+        return tokenConfigMapper.selectById(tokenId);
     }
 
     private void publishStatusChange(String txHash, String fromStatus, String toStatus,
-                                     Long blockNumber, String blockHash, BigInteger actualAmount) {
+                                     Long blockNumber, BigInteger actualAmount,
+                                     boolean anomaly, String anomalyReason) {
         try {
             TxStatusChangedMessage message = TxStatusChangedMessage.builder()
                     .txHash(txHash)
                     .fromStatus(fromStatus)
                     .toStatus(toStatus)
                     .blockNumber(blockNumber)
-                    .blockHash(blockHash)
                     .actualAmount(actualAmount)
+                    .anomaly(anomaly)
+                    .anomalyReason(anomalyReason)
                     .build();
             rocketMQTemplate.convertAndSend(TX_STATUS_TOPIC, message);
         } catch (Exception e) {

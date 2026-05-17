@@ -13,7 +13,8 @@ public enum WithdrawStatus {
     PENDING_CONFIRM("PENDING_CONFIRM", "Waiting for on-chain confirmation"),
     SUCCESS("SUCCESS", "Withdrawal confirmed on-chain"),
     FAILED("FAILED", "Withdrawal failed"),
-    REJECTED("REJECTED", "Withdrawal rejected by risk control");
+    REJECTED("REJECTED", "Withdrawal rejected by risk control"),
+    ANOMALY("ANOMALY", "Amount mismatch detected");
 
     private final String code;
     private final String description;

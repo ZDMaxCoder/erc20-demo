@@ -1,6 +1,8 @@
 package com.erc20.platform.blockchain.monitor;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.erc20.platform.blockchain.adapter.TokenMetadataCache;
+import com.erc20.platform.blockchain.adapter.TokenRiskProfileRegistry;
 import com.erc20.platform.common.enums.AlertLevel;
 import com.erc20.platform.dal.mapper.TokenConfigMapper;
 import com.erc20.platform.domain.entity.TokenConfig;
@@ -32,13 +34,19 @@ public class AdminEventMonitor {
     private final Web3j web3j;
     private final TokenConfigMapper tokenConfigMapper;
     private final AlertService alertService;
+    private final TokenRiskProfileRegistry tokenRiskProfileRegistry;
+    private final TokenMetadataCache tokenMetadataCache;
 
     public AdminEventMonitor(Web3j web3j,
                              TokenConfigMapper tokenConfigMapper,
-                             AlertService alertService) {
+                             AlertService alertService,
+                             TokenRiskProfileRegistry tokenRiskProfileRegistry,
+                             TokenMetadataCache tokenMetadataCache) {
         this.web3j = web3j;
         this.tokenConfigMapper = tokenConfigMapper;
         this.alertService = alertService;
+        this.tokenRiskProfileRegistry = tokenRiskProfileRegistry;
+        this.tokenMetadataCache = tokenMetadataCache;
     }
 
     public void checkAdminEvents(long fromBlock, long toBlock) {
@@ -95,7 +103,10 @@ public class AdminEventMonitor {
         long blockNumber = logEntry.getBlockNumber().longValue();
 
         if (PAUSED_EVENT_TOPIC.equalsIgnoreCase(topic0)) {
-            String content = "Token " + token.getTokenSymbol() + " paused at block " + blockNumber;
+            token.setEnabled(0);
+            tokenConfigMapper.updateById(token);
+            tokenRiskProfileRegistry.invalidate(contractAddr);
+            String content = "Token " + token.getTokenSymbol() + " paused at block " + blockNumber + ", auto-disabled";
             alertService.alert("TOKEN_ADMIN_EVENT", AlertLevel.CRITICAL, content);
         } else if (UPGRADED_EVENT_TOPIC.equalsIgnoreCase(topic0)) {
             String newImpl = "unknown";
@@ -106,7 +117,11 @@ public class AdminEventMonitor {
                     newImpl = "0x" + hex.substring(hex.length() - 40).toLowerCase();
                 }
             }
-            String content = "Token " + token.getTokenSymbol() + " upgraded to " + newImpl + " at block " + blockNumber;
+            token.setEnabled(0);
+            tokenConfigMapper.updateById(token);
+            tokenRiskProfileRegistry.invalidate(contractAddr);
+            tokenMetadataCache.invalidate(contractAddr);
+            String content = "Token " + token.getTokenSymbol() + " upgraded to " + newImpl + " at block " + blockNumber + ", auto-disabled";
             alertService.alert("TOKEN_ADMIN_EVENT", AlertLevel.CRITICAL, content);
         }
     }

@@ -253,11 +253,17 @@ public class WithdrawService {
 
     @Transactional
     public void confirmWithdraw(long withdrawId, String txHash, long blockNumber) {
-        confirmWithdraw(withdrawId, txHash, blockNumber, null);
+        confirmWithdraw(withdrawId, txHash, blockNumber, null, false, null);
     }
 
     @Transactional
     public void confirmWithdraw(long withdrawId, String txHash, long blockNumber, BigInteger actualAmount) {
+        confirmWithdraw(withdrawId, txHash, blockNumber, actualAmount, false, null);
+    }
+
+    @Transactional
+    public void confirmWithdraw(long withdrawId, String txHash, long blockNumber,
+                                BigInteger actualAmount, boolean anomaly, String anomalyReason) {
         RLock lock = redissonClient.getLock("withdraw:" + withdrawId);
         boolean acquired;
         try {
@@ -271,7 +277,7 @@ public class WithdrawService {
         }
 
         try {
-            doConfirmWithdraw(withdrawId, txHash, blockNumber, actualAmount);
+            doConfirmWithdraw(withdrawId, txHash, blockNumber, actualAmount, anomaly, anomalyReason);
         } finally {
             if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
@@ -279,12 +285,40 @@ public class WithdrawService {
         }
     }
 
-    private void doConfirmWithdraw(long withdrawId, String txHash, long blockNumber, BigInteger actualAmount) {
+    private void doConfirmWithdraw(long withdrawId, String txHash, long blockNumber,
+                                   BigInteger actualAmount, boolean anomaly, String anomalyReason) {
         WithdrawRecord record = getWithdrawRecord(withdrawId);
         WithdrawStatus currentStatus = parseStatus(record.getStatus());
 
-        if (currentStatus == WithdrawStatus.SUCCESS || currentStatus == WithdrawStatus.FAILED) {
+        if (currentStatus == WithdrawStatus.SUCCESS || currentStatus == WithdrawStatus.FAILED
+                || currentStatus == WithdrawStatus.ANOMALY) {
             log.info("Withdrawal {} already in terminal state {}, skipping", withdrawId, currentStatus);
+            return;
+        }
+
+        if (anomaly) {
+            transitionToAnomaly(record, currentStatus, txHash, withdrawId, anomalyReason);
+            alertService.alert("WITHDRAW_AMOUNT_MISMATCH", AlertLevel.CRITICAL, anomalyReason);
+            return;
+        }
+
+        if (actualAmount == null) {
+            transitionToAnomaly(record, currentStatus, txHash, withdrawId,
+                    "Withdrawal " + withdrawId + ": actualAmount is null, txHash=" + txHash);
+            return;
+        }
+
+        TokenConfig tokenConfig = getEnabledToken(record.getTokenId());
+        BigInteger expectedChainAmount = AmountUtil.toChainAmount(
+                record.getAmount(), record.getAmountExponent(), tokenConfig.getDecimals());
+
+        if (!actualAmount.equals(expectedChainAmount)) {
+            transitionToAnomaly(record, currentStatus, txHash, withdrawId,
+                    String.format("Withdrawal %d: expected=%s, actual=%s, txHash=%s",
+                            withdrawId, expectedChainAmount, actualAmount, txHash));
+            alertService.alert("WITHDRAW_AMOUNT_MISMATCH", AlertLevel.CRITICAL,
+                    String.format("Withdrawal %d: expected=%s, actual=%s, txHash=%s",
+                            withdrawId, expectedChainAmount, actualAmount, txHash));
             return;
         }
 
@@ -297,17 +331,6 @@ public class WithdrawService {
         record.setTxHash(txHash);
         record.setUpdatedAt(new Date());
         withdrawRecordMapper.updateById(record);
-
-        if (actualAmount != null) {
-            TokenConfig tokenConfig = getEnabledToken(record.getTokenId());
-            BigInteger expectedChainAmount = AmountUtil.toChainAmount(
-                    record.getAmount(), record.getAmountExponent(), tokenConfig.getDecimals());
-            if (!actualAmount.equals(expectedChainAmount)) {
-                alertService.alert("WITHDRAW_AMOUNT_MISMATCH", AlertLevel.CRITICAL,
-                        String.format("Withdrawal %d: expected=%s, actual=%s, txHash=%s",
-                                withdrawId, expectedChainAmount, actualAmount, txHash));
-            }
-        }
 
         accountService.decreaseFrozen(AccountOperateRequest.builder()
                 .userId(record.getUserId())
@@ -333,6 +356,21 @@ public class WithdrawService {
 
         businessMetrics.incrementWithdraw();
         log.info("Withdrawal {} confirmed, txHash={}, block={}", withdrawId, txHash, blockNumber);
+    }
+
+    private void transitionToAnomaly(WithdrawRecord record, WithdrawStatus currentStatus,
+                                     String txHash, long withdrawId, String reason) {
+        if (!stateMachine.canTransition(currentStatus, WithdrawStatus.PENDING_CONFIRM)
+                && currentStatus != WithdrawStatus.PENDING_CONFIRM) {
+            stateMachine.assertTransition(currentStatus, WithdrawStatus.ANOMALY);
+        }
+
+        record.setStatus(WithdrawStatus.ANOMALY.getCode());
+        record.setTxHash(txHash);
+        record.setUpdatedAt(new Date());
+        withdrawRecordMapper.updateById(record);
+
+        log.warn("Withdrawal {} amount anomaly: {}", withdrawId, reason);
     }
 
     @Transactional

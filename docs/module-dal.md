@@ -43,8 +43,10 @@
 | `V6__add_transaction_record_wallet_fields.sql` | 交易记录钱包相关字段 |
 | `V7__init_address_blacklist.sql` | t_address_blacklist |
 | `V8__add_deposit_service_fields.sql` | 充值服务补充字段 |
-| `V9__add_token_type.sql` | 代币类型字段 |
+| `V9__add_token_type.sql` | 代币类型字段（token_type） |
 | `V10__add_chain_id_to_deposit_and_withdraw.sql` | 充值/提现表添加 chain_id 列 |
+| `V11__add_token_capabilities_and_risk_level.sql` | t_token_config 增加 capabilities(VARCHAR 512) 和 risk_level(VARCHAR 16 DEFAULT 'LOW') |
+| `V12__add_token_circuit_breaker_status.sql` | t_token_config 增加 circuit_breaker_status(VARCHAR 16 NOT NULL DEFAULT 'CLOSED') |
 
 ## 索引策略
 

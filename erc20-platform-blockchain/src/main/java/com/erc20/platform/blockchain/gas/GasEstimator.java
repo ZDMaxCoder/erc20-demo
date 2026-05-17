@@ -67,6 +67,41 @@ public class GasEstimator {
         }
     }
 
+    public BigInteger estimateERC20Approve(String contract, String from, String spender, BigInteger amount) {
+        try {
+            Function function = new Function(
+                    "approve",
+                    Arrays.asList(new Address(spender), new Uint256(amount)),
+                    Collections.<TypeReference<?>>emptyList()
+            );
+            String encodedFunction = FunctionEncoder.encode(function);
+
+            Transaction tx = Transaction.createEthCallTransaction(from, contract, encodedFunction);
+            EthEstimateGas response = web3j.ethEstimateGas(tx).send();
+
+            if (response.hasError()) {
+                String errorMessage = response.getError().getMessage();
+                if (errorMessage != null && errorMessage.contains("execution reverted")) {
+                    throw new ContractRevertException(errorMessage);
+                }
+                log.warn("Gas estimation error (non-revert) for approve: {}, using default {}", errorMessage, DEFAULT_ERC20_GAS);
+                return DEFAULT_ERC20_GAS;
+            }
+
+            BigInteger estimate = response.getAmountUsed();
+            int bufferPercent = gasProperties.getGasLimitBufferPercent();
+            return estimate.multiply(BigInteger.valueOf(100 + bufferPercent)).divide(BigInteger.valueOf(100));
+        } catch (ContractRevertException e) {
+            throw e;
+        } catch (IOException e) {
+            log.warn("Network error estimating gas for ERC20 approve, using default {}", DEFAULT_ERC20_GAS, e);
+            return DEFAULT_ERC20_GAS;
+        } catch (Exception e) {
+            log.warn("Failed to estimate gas for ERC20 approve, using default {}", DEFAULT_ERC20_GAS, e);
+            return DEFAULT_ERC20_GAS;
+        }
+    }
+
     public BigInteger estimateEthTransfer() {
         return ETH_TRANSFER_GAS;
     }

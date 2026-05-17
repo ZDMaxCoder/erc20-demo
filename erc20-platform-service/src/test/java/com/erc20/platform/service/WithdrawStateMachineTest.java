@@ -113,4 +113,10 @@ class WithdrawStateMachineTest {
         assertFalse(stateMachine.canTransition(WithdrawStatus.APPROVED, WithdrawStatus.SUCCESS));
         assertThrows(BizException.class, () -> stateMachine.assertTransition(WithdrawStatus.APPROVED, WithdrawStatus.SUCCESS));
     }
+
+    @Test
+    void canTransition_pendingConfirmToAnomaly_returnsTrue() {
+        assertTrue(stateMachine.canTransition(WithdrawStatus.PENDING_CONFIRM, WithdrawStatus.ANOMALY));
+        assertDoesNotThrow(() -> stateMachine.assertTransition(WithdrawStatus.PENDING_CONFIRM, WithdrawStatus.ANOMALY));
+    }
 }
